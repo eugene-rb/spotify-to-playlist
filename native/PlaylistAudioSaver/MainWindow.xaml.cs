@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -23,6 +24,29 @@ public partial class MainWindow : Window
     private string outputDir = "", operation = "";
     private Action? afterIdle;
     private readonly bool preview = Environment.GetCommandLineArgs().Contains("--preview");
+
+    private readonly ObservableCollection<CorrectionCandidate> correctionResults = [];
+    private Window? correctionWindow;
+    private int correctionIndex = -1;
+    private ListBox? correctionListBox;
+    private TextBox? correctionQueryBox, correctionUrlBox;
+    private Button? correctionSearchButton, correctionConfirmButton;
+    private TextBlock? correctionStatus;
+
+    private static readonly DataTemplate CandidateTemplate = (DataTemplate)XamlReader.Parse("""
+        <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+          <Grid Margin="4,7">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="128" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+            <Border Width="116" Height="66" CornerRadius="5" Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+              <Image Source="{Binding Thumbnail}" Stretch="UniformToFill" />
+            </Border>
+            <StackPanel Grid.Column="1" Margin="12,0,4,0" VerticalAlignment="Center">
+              <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+              <TextBlock Text="{Binding Detail}" Opacity="0.65" FontSize="12" Margin="0,4,0,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+            </StackPanel>
+          </Grid>
+        </DataTemplate>
+        """);
 
     public MainWindow()
     {
@@ -73,8 +97,15 @@ public partial class MainWindow : Window
             case "idle":
                 if (operation == "check_update" && StatusText.Text == "更新を確認中…") StatusText.Text = "準備完了";
                 mappingReady = message.Flag("mapping_ready"); SetBusy(false);
+                if (correctionWindow != null)
+                {
+                    SetCorrectionBusy(false);
+                    if (correctionResults.Count == 0 && correctionStatus?.Text == "候補を検索しています…")
+                        correctionStatus.Text = "候補が見つかりませんでした。キーワードを変えるか、URLを直接指定してください。";
+                }
                 var next = afterIdle; afterIdle = null; next?.Invoke();
                 break;
+            case "correction_candidates": FillCorrectionResults(message); SetCorrectionBusy(false); break;
             case "playlist":
                 Tracks.Clear(); mappingReady = false;
                 foreach (var data in message.GetProperty("tracks").EnumerateArray())
@@ -95,7 +126,7 @@ public partial class MainWindow : Window
                 UpdateActions();
                 break;
             case "progress":
-                if (operation is not ("load" or "correct" or "check_update")) Progress.IsIndeterminate = false;
+                if (operation is not ("load" or "correct" or "correct_search" or "check_update")) Progress.IsIndeterminate = false;
                 Progress.Value = Math.Clamp(message.GetProperty("percent").GetDouble(), 0, 100);
                 StatusText.Text = message.Text("message"); break;
             case "notice":
@@ -145,7 +176,7 @@ public partial class MainWindow : Window
     private void SetBusy(bool value, string action = "", bool cancellable = false)
     {
         busy = value; operation = action;
-        Progress.IsIndeterminate = value && action is "load" or "connect" or "correct" or "check_update";
+        Progress.IsIndeterminate = value && action is "load" or "connect" or "correct" or "correct_search" or "check_update";
         CancelButton.Visibility = value && cancellable ? Visibility.Visible : Visibility.Collapsed;
         CancelButton.IsEnabled = true;
         SettingsFields.IsEnabled = !value && ready;
@@ -198,15 +229,147 @@ public partial class MainWindow : Window
     private void YoutubeLink_Click(object sender, RoutedEventArgs e) { if (TrackGrid.SelectedItem is TrackRow track) OpenLink(track.VideoUrl); }
     private void Correct_Click(object sender, RoutedEventArgs e)
     {
-        if (TrackGrid.SelectedItem is not TrackRow track) return;
-        var input = new TextBox { Text = track.VideoUrl, Style = (Style)FindResource("Field"), MinWidth = 420, Margin = new Thickness(0, 16, 0, 0) };
-        System.Windows.Automation.AutomationProperties.SetName(input, "正しいYouTube動画のURL");
-        System.Windows.Automation.AutomationProperties.SetAutomationId(input, "CorrectionUrl");
-        var search = new Button { Content = "YouTubeで曲を探す ↗", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
-        search.Click += (_, _) => OpenLink("https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(track.Name + " " + track.Subtitle.Split("  ·  ")[0]));
-        var extra = new StackPanel(); extra.Children.Add(input); extra.Children.Add(search);
-        if (ShowDialog("候補を訂正", $"{track.Name}\n{track.Subtitle}\n\n正しいYouTube動画のURLを指定してください。", "この動画に変更", extra))
-            StartCommand(new { action = "correct", index = track.Index, url = input.Text.Trim() }, "correct", "指定した動画を確認中…");
+        if (TrackGrid.SelectedItem is not TrackRow track || busy || !ready) return;
+
+        correctionIndex = track.Index;
+        correctionResults.Clear();
+
+        var grid = new Grid { Margin = new Thickness(24) };
+        for (var i = 0; i < 5; i++) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        grid.RowDefinitions[3].Height = new GridLength(1, GridUnitType.Star);
+
+        var head = new StackPanel();
+        head.Children.Add(new TextBlock { Text = "候補を訂正", FontSize = 22, FontWeight = FontWeights.SemiBold });
+        head.Children.Add(new TextBlock { Text = $"{track.Name}  ·  {track.Subtitle}", Style = (Style)FindResource("Muted"),
+            Margin = new Thickness(0, 6, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.NoWrap });
+        Place(grid, 0, head);
+
+        correctionQueryBox = new TextBox { Style = (Style)FindResource("Field"), Height = 38,
+            Text = $"{track.Name} {track.Subtitle.Split("  ·  ")[0]}".Trim() };
+        System.Windows.Automation.AutomationProperties.SetName(correctionQueryBox, "YouTube検索キーワード");
+        correctionQueryBox.KeyDown += (_, ke) => { if (ke.Key == Key.Enter) { ke.Handled = true; RequestCorrectionSearch(); } };
+        correctionSearchButton = new Button { Content = "検索", Style = (Style)FindResource("Primary"), MinWidth = 84, Margin = new Thickness(8, 0, 0, 0) };
+        correctionSearchButton.Click += (_, _) => RequestCorrectionSearch();
+        var searchRow = new Grid { Margin = new Thickness(0, 18, 0, 10) };
+        searchRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        searchRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        searchRow.Children.Add(correctionQueryBox);
+        Grid.SetColumn(correctionSearchButton, 1); searchRow.Children.Add(correctionSearchButton);
+        Place(grid, 1, searchRow);
+
+        correctionStatus = new TextBlock { Style = (Style)FindResource("Muted"), Margin = new Thickness(0, 0, 0, 8), TextWrapping = TextWrapping.Wrap };
+        Place(grid, 2, correctionStatus);
+
+        correctionListBox = new ListBox { ItemsSource = correctionResults, ItemTemplate = CandidateTemplate,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch, BorderThickness = new Thickness(0), Background = Brushes.Transparent };
+        System.Windows.Automation.AutomationProperties.SetAutomationId(correctionListBox, "CorrectionResults");
+        System.Windows.Automation.AutomationProperties.SetName(correctionListBox, "YouTube候補");
+        ScrollViewer.SetHorizontalScrollBarVisibility(correctionListBox, ScrollBarVisibility.Disabled);
+        correctionListBox.MouseDoubleClick += (_, _) => ConfirmCorrection();
+        correctionListBox.SelectionChanged += (_, ce) =>
+        {
+            if (ce.AddedItems.Count > 0 && ce.AddedItems[0] is CorrectionCandidate picked && correctionUrlBox != null)
+                correctionUrlBox.Text = picked.Url;
+        };
+        Place(grid, 3, new Border { BorderBrush = (Brush)FindResource("CardStrokeColorDefaultBrush"), BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6), Margin = new Thickness(0, 0, 0, 12), Child = correctionListBox });
+
+        var bottom = new StackPanel();
+        bottom.Children.Add(new TextBlock { Text = "候補を選ぶと下のURL欄に反映されます。URLを直接貼り付けても構いません。", Style = (Style)FindResource("Muted"), Margin = new Thickness(0, 0, 0, 6) });
+        correctionUrlBox = new TextBox { Style = (Style)FindResource("Field") };
+        System.Windows.Automation.AutomationProperties.SetName(correctionUrlBox, "正しいYouTube動画のURL");
+        System.Windows.Automation.AutomationProperties.SetAutomationId(correctionUrlBox, "CorrectionUrl");
+        bottom.Children.Add(correctionUrlBox);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
+        var cancel = new Button { Content = "キャンセル", IsCancel = true, Style = (Style)FindResource("Action") };
+        System.Windows.Automation.AutomationProperties.SetAutomationId(cancel, "DialogCancel");
+        correctionConfirmButton = new Button { Content = "この動画に変更", IsDefault = true, Style = (Style)FindResource("Primary"), Margin = new Thickness(8, 0, 0, 0) };
+        System.Windows.Automation.AutomationProperties.SetAutomationId(correctionConfirmButton, "DialogConfirm");
+        correctionConfirmButton.Click += (_, _) => ConfirmCorrection();
+        buttons.Children.Add(cancel); buttons.Children.Add(correctionConfirmButton);
+        bottom.Children.Add(buttons);
+        Place(grid, 4, bottom);
+
+        var dialog = new Window { Owner = this, Title = "候補を訂正", Width = 620, Height = 660,
+            ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ShowInTaskbar = false, FontFamily = FontFamily, FontSize = 13, Content = grid };
+        correctionWindow = dialog;
+        RequestCorrectionSearch();
+        dialog.ShowDialog();
+
+        correctionWindow = null;
+        correctionIndex = -1;
+        correctionListBox = null;
+        correctionQueryBox = correctionUrlBox = null;
+        correctionSearchButton = correctionConfirmButton = null;
+        correctionStatus = null;
+        correctionResults.Clear();
+    }
+
+    private static void Place(Grid grid, int row, UIElement element) { Grid.SetRow(element, row); grid.Children.Add(element); }
+
+    private void RequestCorrectionSearch()
+    {
+        if (correctionWindow is null || correctionIndex < 0) return;
+        if (busy || !ready)
+        {
+            if (correctionStatus != null) correctionStatus.Text = "他の処理の完了を待っています…";
+            return;
+        }
+        correctionResults.Clear();
+        if (correctionStatus != null) correctionStatus.Text = "候補を検索しています…";
+        SetCorrectionBusy(true);
+        StartCommand(new { action = "correct_search", index = correctionIndex, query = correctionQueryBox?.Text.Trim() ?? "" },
+            "correct_search", "候補を検索しています…");
+    }
+
+    private void ConfirmCorrection()
+    {
+        if (busy || correctionWindow is null) return;
+        var url = correctionUrlBox?.Text.Trim() ?? "";
+        if (url.Length == 0)
+        {
+            if (correctionStatus != null) correctionStatus.Text = "候補を1つ選ぶか、URLを入力してください。";
+            return;
+        }
+        var index = correctionIndex;
+        correctionWindow.Close();
+        StartCommand(new { action = "correct", index, url }, "correct", "指定した動画を確認中…");
+    }
+
+    private void SetCorrectionBusy(bool searching)
+    {
+        if (correctionSearchButton != null) correctionSearchButton.IsEnabled = !searching;
+        if (correctionQueryBox != null) correctionQueryBox.IsEnabled = !searching;
+        if (correctionConfirmButton != null) correctionConfirmButton.IsEnabled = !searching;
+    }
+
+    private void FillCorrectionResults(JsonElement message)
+    {
+        if (correctionWindow is null || message.GetProperty("index").GetInt32() != correctionIndex) return;
+        correctionResults.Clear();
+        foreach (var item in message.GetProperty("candidates").EnumerateArray())
+        {
+            var row = new CorrectionCandidate { Url = item.Text("url"), Title = item.Text("title"),
+                Detail = $"{item.Text("uploader")}  ·  {item.Text("duration_text")}" };
+            if (item.Text("thumbnail") is { Length: > 0 } encoded)
+            {
+                try
+                {
+                    using var stream = new MemoryStream(Convert.FromBase64String(encoded));
+                    var bitmap = new BitmapImage();
+                    bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    bitmap.DecodePixelWidth = 160; bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
+                    row.Thumbnail = bitmap;
+                }
+                catch (Exception ex) when (ex is FormatException or IOException or NotSupportedException or ArgumentException) { }
+            }
+            correctionResults.Add(row);
+        }
+        if (correctionStatus != null)
+            correctionStatus.Text = correctionResults.Count > 0
+                ? "候補を選んで「この動画に変更」。合わなければキーワードを変えて再検索できます。"
+                : "候補が見つかりませんでした。キーワードを変えるか、URLを直接指定してください。";
     }
     private void Library_Click(object sender, RoutedEventArgs e) { if (LibraryPage is null) return; LibraryPage.Visibility = Visibility.Visible; SettingsPage.Visibility = Visibility.Collapsed; }
     private void Settings_Click(object sender, RoutedEventArgs e) { if (LibraryPage is null) return; LibraryPage.Visibility = Visibility.Collapsed; SettingsPage.Visibility = Visibility.Visible; }

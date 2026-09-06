@@ -141,6 +141,33 @@ def test_manual_correction_can_recover_failed_match(service, monkeypatch):
     assert backend.mapping_ready and events[-1]["event"] == "idle"
 
 
+def test_correction_search_returns_ranked_candidates(service, monkeypatch):
+    backend, events = service
+    found = [
+        SearchCandidate("https://www.youtube.com/watch?v=aaaaaaaaaaa", "Best", "Artist", 181, 1.7, title_score=0.95),
+        SearchCandidate("https://www.youtube.com/watch?v=bbbbbbbbbbb", "Cover", "Someone", 181, 0.2, title_score=0.3),
+    ]
+    seen = {}
+    def search_candidates(_self, _track, query="", limit=6):
+        seen["query"] = query
+        return found
+    monkeypatch.setattr(AudioDownloader, "search_candidates", search_candidates)
+    monkeypatch.setattr(AudioDownloader, "fetch_thumbnail", lambda *_: b"")
+    run_command(backend, {"action": "correct_search", "index": 0, "query": "魔性の女 椎名林檎"})
+    assert seen["query"] == "魔性の女 椎名林檎"
+    payload = next(e for e in events if e["event"] == "correction_candidates")
+    assert payload["index"] == 0
+    assert [c["url"][-11:] for c in payload["candidates"]] == ["aaaaaaaaaaa", "bbbbbbbbbbb"]
+    assert payload["candidates"][0]["duration_text"] == "3:01"
+    assert not backend.busy
+
+
+def test_correction_search_rejects_bad_index(service):
+    backend, _ = service
+    run_command(backend, {"action": "correct_search", "index": 99, "query": ""})
+    assert not backend.busy
+
+
 def test_failed_correction_preserves_previous_match(service, monkeypatch):
     backend, events = service
     track = backend.playlist.tracks[0]

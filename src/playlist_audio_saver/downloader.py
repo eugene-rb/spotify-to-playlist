@@ -50,6 +50,7 @@ class SearchCandidate:
     duration: float
     score: float
     thumbnail_url: str = ""
+    title_score: float = 0.0
 
 
 ProgressCallback = Callable[[float | None, str], None]
@@ -57,6 +58,10 @@ ProgressCallback = Callable[[float | None, str], None]
 
 INVALID_FILE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 SPACE_RUN = re.compile(r"\s+")
+# A single Latin letter/digit stuck to the end of a non-ASCII title, e.g. the
+# "A" in "魔性の女A". YouTube search sometimes returns nothing for such a token
+# next to certain words, so a relaxed query drops it.
+TRAILING_LATIN = re.compile(r"(?<=[^\x00-\x7f])[A-Za-z0-9](?=\s*$)")
 
 
 def canonical_youtube_url(value: str) -> str:
@@ -77,10 +82,33 @@ def canonical_youtube_url(value: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
+# Decorative tags stripped before the title is compared. Lyric / cover / live
+# markers are deliberately NOT listed here: _noise_penalty needs to still see
+# them so those uploads get pushed down the ranking.
 BRACKET_NOISE = re.compile(
-    r"[\[(](official\s*(music\s*)?video|official\s*audio|lyrics?|audio|mv|hd|4k)[\])]",
+    r"[\[(](official\s*(music\s*)?video|official\s*audio|audio only|audio|"
+    r"mv|m/?v|hd|hq|4k|full\s*ver(sion)?|完全版|フル)[\])]",
     re.IGNORECASE,
 )
+
+# Terms that mark a candidate as the wrong kind of upload. They are matched
+# against the normalised title and the uploader name. ASCII single words are
+# matched as whole tokens; phrases and non-ASCII terms as substrings.
+LYRIC_TERMS = ("lyric", "lyrics", "歌詞", "字幕", "가사", "cc字幕")
+COVER_TERMS = ("cover", "covered", "カバー", "歌ってみた", "唄ってみた", "弾いてみた",
+               "叩いてみた", "cover by", "歌わせて", "を歌う", "うたってみた")
+KARAOKE_TERMS = ("karaoke", "カラオケ", "instrumental", "インスト", "inst", "off vocal",
+                 "offvocal", "オフボーカル", "backing track", "music box", "オルゴール")
+EDIT_TERMS = ("remix", "リミックス", "nightcore", "sped up", "spedup", "slowed", "8d audio",
+              "bass boosted", "mashup", "マッシュアップ", "作業用", "1時間", "1 hour",
+              "10 hours", "loop", "ループ", "耐久", "つなぎ")
+LIVE_TERMS = ("live", "ライブ", "ライヴ", "concert", "コンサート", "公演", "ツアー",
+              "弾き語り", "セッション")
+
+# Small set of self-explanatory official distributor channels. Kept short on
+# purpose: the load-bearing signals are "uploader == artist", "<artist> - Topic"
+# and "<artist>VEVO", all of which verify against the track's own metadata.
+LABEL_HINTS = ("universal music", "sony music", "avex", "warner music", "pony canyon")
 
 
 def safe_filename(value: str, fallback: str = "untitled", max_length: int = 120) -> str:
@@ -109,39 +137,117 @@ def ffmpeg_available(configured_path: str = "") -> bool:
 
 
 def score_candidate(track: Track, candidate: dict[str, Any]) -> float:
-    title = str(candidate.get("title") or "")
-    uploader = str(candidate.get("uploader") or candidate.get("channel") or "")
-    normalized_title = _normalize(title)
-    desired = _normalize(f"{track.artist_text} {track.name}")
-    title_only = _normalize(track.name)
-    artist = _normalize(track.artists[0]) if track.artists else ""
-    similarity = max(
-        SequenceMatcher(None, desired, normalized_title).ratio(),
-        SequenceMatcher(None, title_only, normalized_title).ratio() * 0.88,
+    """Overall ranking score for a YouTube search result."""
+    return assess_candidate(track, candidate)[0]
+
+
+def assess_candidate(track: Track, candidate: dict[str, Any]) -> tuple[float, float]:
+    """Return ``(overall score, title-only match 0..1)`` for a search result.
+
+    The song title (with the artist stripped out) dominates the score so that a
+    different song by the right artist can never look like a confident match.
+    The uploader being the artist, a ``- Topic`` art-track channel or a ``VEVO``
+    channel is weighted heavily; lyric videos, covers, karaoke, edits and live
+    clips are pushed down.
+    """
+    title = _normalize(str(candidate.get("title") or ""))
+    uploader = _normalize(str(candidate.get("uploader") or candidate.get("channel") or ""))
+    artists = [normal for artist in track.artists if (normal := _normalize(artist))]
+    want_title = _normalize(track.name)
+
+    stripped = _without(title, artists)
+    title_score = max(
+        SequenceMatcher(None, want_title, stripped).ratio(),
+        SequenceMatcher(None, want_title, title).ratio() * 0.9,
+        _coverage(want_title, stripped) * 0.9,
     )
-    artist_bonus = 0.14 if artist and (artist in normalized_title or artist in _normalize(uploader)) else 0
+
+    authority = _uploader_authority(artists, title, uploader)
+
     duration = float(candidate.get("duration") or 0)
     expected = track.duration_ms / 1000
     if duration and expected:
         difference = abs(duration - expected)
         duration_score = max(0.0, 1.0 - difference / max(expected, 1)) * 0.24
         if difference > 30:
-            duration_score -= min(0.35, difference / max(expected, 1) * 0.35)
+            duration_score -= min(0.4, difference / max(expected, 1) * 0.4)
     else:
-        duration_score = -0.08
-    noise_penalty = 0.0
-    lowered = normalized_title
-    if any(term in lowered for term in ("live", "cover", "remix", "nightcore", "sped up")):
-        noise_penalty = 0.18
-    if candidate.get("is_live") or candidate.get("live_status") == "is_live":
-        noise_penalty += 0.5
-    return similarity + artist_bonus + duration_score - noise_penalty
+        duration_score = -0.05
+
+    penalty = _noise_penalty(candidate, title, uploader)
+    overall = title_score * 1.15 + authority + duration_score - penalty
+    return overall, title_score
 
 
 def _normalize(value: str) -> str:
     value = unicodedata.normalize("NFKC", value).casefold()
     value = BRACKET_NOISE.sub(" ", value)
     return SPACE_RUN.sub(" ", re.sub(r"[^\w]+", " ", value)).strip()
+
+
+def _without(text: str, phrases: list[str]) -> str:
+    for phrase in phrases:
+        if phrase and phrase in text:
+            text = text.replace(phrase, " ")
+    return SPACE_RUN.sub(" ", text).strip()
+
+
+def _coverage(want: str, have: str) -> float:
+    want_tokens = [token for token in want.split() if token]
+    if not want_tokens:
+        return 0.0
+    have_tokens = set(have.split())
+    return sum(token in have_tokens for token in want_tokens) / len(want_tokens)
+
+
+def _compact(value: str) -> str:
+    """Drop spaces so CJK names written as ``紫 今`` match ``紫今``."""
+    return value.replace(" ", "")
+
+
+def _matches_term(term: str, text: str, tokens: set[str]) -> bool:
+    if " " in term or not term.isascii():
+        return term in text
+    return term in tokens
+
+
+def _uploader_authority(artists: list[str], title: str, uploader: str) -> float:
+    channel = _compact(uploader)
+    topic = channel[:-5] if channel.endswith("topic") else channel
+    vevo = channel[:-4] if channel.endswith("vevo") else channel
+    compact_title = _compact(title)
+    for artist in artists:
+        name = _compact(artist)
+        if not name:
+            continue
+        if (name in channel
+                or SequenceMatcher(None, name, topic).ratio() > 0.82
+                or SequenceMatcher(None, name, vevo).ratio() > 0.82):
+            return 0.45
+    if any(hint.replace(" ", "") in channel for hint in LABEL_HINTS):
+        return 0.28
+    if any((name := _compact(artist)) and name in compact_title for artist in artists):
+        return 0.1
+    return 0.0
+
+
+def _noise_penalty(candidate: dict[str, Any], title: str, uploader: str) -> float:
+    text = f"{title} {uploader}"
+    tokens = set(text.split())
+    penalty = 0.0
+    if any(_matches_term(term, text, tokens) for term in LYRIC_TERMS):
+        penalty += 0.15
+    if any(_matches_term(term, text, tokens) for term in COVER_TERMS):
+        penalty += 0.55
+    if any(_matches_term(term, text, tokens) for term in KARAOKE_TERMS):
+        penalty += 0.55
+    if any(_matches_term(term, text, tokens) for term in EDIT_TERMS):
+        penalty += 0.5
+    if any(_matches_term(term, title, set(title.split())) for term in LIVE_TERMS):
+        penalty += 0.3
+    if candidate.get("is_live") or candidate.get("live_status") == "is_live":
+        penalty += 0.6
+    return penalty
 
 
 class AudioDownloader:
@@ -235,7 +341,63 @@ class AudioDownloader:
         return target, False
 
     def search(self, track: Track) -> SearchCandidate:
-        query = f"{track.artist_text} - {track.name} official audio"
+        ranked = self._ranked(track, "", max(1, min(self.config.search_results, 10)))
+        if not ranked:
+            raise DownloadError("YouTubeで候補が見つかりませんでした。")
+        return ranked[0]
+
+    def search_candidates(self, track: Track, query: str = "", limit: int = 6) -> list[SearchCandidate]:
+        return self._ranked(track, query.strip(), limit)
+
+    def _query_variants(self, track: Track, user_query: str) -> list[str]:
+        artist, title = track.artist_text.strip(), track.name.strip()
+        loose_title = TRAILING_LATIN.sub("", title).strip()
+        raw = [
+            user_query,
+            f"{artist} - {title} official audio" if not user_query else "",
+            f"{artist} {title}",
+            f"{title} {artist}",
+            f"{artist} {loose_title}" if loose_title and loose_title != title else "",
+            title,
+        ]
+        variants: list[str] = []
+        for candidate in raw:
+            collapsed = " ".join(candidate.split())
+            if collapsed and collapsed not in variants:
+                variants.append(collapsed)
+        return variants
+
+    def _ranked(self, track: Track, user_query: str, limit: int) -> list[SearchCandidate]:
+        wanted = max(1, min(max(limit, self.config.search_results), 15))
+        entries: list[dict[str, Any]] = []
+        for query in self._query_variants(track, user_query):
+            entries = self._search_entries(f"ytsearch{wanted}:{query}")
+            if entries:
+                break
+        candidates: list[SearchCandidate] = []
+        for entry in entries:
+            video_id = str(entry.get("id") or "")
+            url = str(entry.get("webpage_url") or entry.get("url") or "")
+            if url and not url.startswith("http") and video_id:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+            elif not url and video_id:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+            if not url:
+                continue
+            overall, title_score = assess_candidate(track, entry)
+            candidates.append(SearchCandidate(
+                url=url,
+                title=str(entry.get("title") or ""),
+                uploader=str(entry.get("uploader") or entry.get("channel") or ""),
+                duration=float(entry.get("duration") or 0),
+                score=overall,
+                thumbnail_url=_thumbnail_url(entry),
+                title_score=title_score,
+            ))
+        candidates.sort(key=lambda candidate: candidate.score, reverse=True)
+        return candidates[:limit]
+
+    def _search_entries(self, target: str) -> list[dict[str, Any]]:
         options = {
             "quiet": True,
             "no_warnings": True,
@@ -243,36 +405,22 @@ class AudioDownloader:
             "skip_download": True,
             "noplaylist": True,
         }
-        try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(
-                    f"ytsearch{max(1, min(self.config.search_results, 10))}:{query}",
-                    download=False,
-                )
-        except Exception as exc:
-            raise DownloadError(f"YouTube検索に失敗しました: {exc}") from exc
-        self._check_cancelled()
-        entries = [entry for entry in (info or {}).get("entries") or [] if entry]
-        if not entries:
-            raise DownloadError("YouTubeで候補が見つかりませんでした。")
-        ranked = sorted(entries, key=lambda entry: score_candidate(track, entry), reverse=True)
-        best = ranked[0]
-        video_id = str(best.get("id") or "")
-        url = str(best.get("webpage_url") or best.get("url") or "")
-        if url and not url.startswith("http") and video_id:
-            url = f"https://www.youtube.com/watch?v={video_id}"
-        elif not url and video_id:
-            url = f"https://www.youtube.com/watch?v={video_id}"
-        if not url:
-            raise DownloadError("検索候補のURLを取得できませんでした。")
-        return SearchCandidate(
-            url=url,
-            title=str(best.get("title") or ""),
-            uploader=str(best.get("uploader") or best.get("channel") or ""),
-            duration=float(best.get("duration") or 0),
-            score=score_candidate(track, best),
-            thumbnail_url=_thumbnail_url(best),
-        )
+        last: Exception | None = None
+        for attempt in range(3):
+            self._check_cancelled()
+            try:
+                with yt_dlp.YoutubeDL(options) as ydl:
+                    info = ydl.extract_info(target, download=False)
+                return [entry for entry in (info or {}).get("entries") or [] if entry]
+            except DownloadCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - transient network / extractor failures
+                last = exc
+                if self.cancel_event.is_set():
+                    raise DownloadCancelled("キャンセルしました。") from exc
+                if attempt < 2 and self.cancel_event.wait(1.5 * (attempt + 1) + 0.5):
+                    raise DownloadCancelled("キャンセルしました。")
+        raise DownloadError(f"YouTube検索に失敗しました: {last}")
 
     def fetch_thumbnail(self, url: str) -> bytes:
         if not url:
@@ -298,8 +446,9 @@ class AudioDownloader:
         self._check_cancelled()
         if not info or info.get("is_live"):
             raise DownloadError("公開済みの通常の動画を指定してください。")
+        overall, title_score = assess_candidate(track, info)
         return SearchCandidate(url, str(info.get("title") or ""), str(info.get("uploader") or info.get("channel") or ""),
-                               float(info.get("duration") or 0), score_candidate(track, info), _thumbnail_url(info))
+                               float(info.get("duration") or 0), overall, _thumbnail_url(info), title_score)
 
     def write_tags(self, path: Path, track: Track) -> None:
         try:

@@ -50,6 +50,9 @@ try {
  $Row.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
  Invoke-Button (Wait-Id $Root 'CorrectButton')
  $Correction = Wait-Id $Root 'CorrectionUrl'
+ if (-not (Find-Id $Root 'CorrectionResults')) { throw 'Correction dialog is missing the candidate list' }
+ # Wait for the auto-search to settle (the confirm button re-enables once it does).
+ Wait-Id $Root 'DialogConfirm' | Out-Null
  $Correction.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('https://example.com/invalid')
  Invoke-Button (Wait-Id $Root 'DialogConfirm')
  Start-Sleep -Milliseconds 500

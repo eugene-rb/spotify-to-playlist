@@ -25,7 +25,14 @@ from .updater import GitHubUpdater, UpdateCancelled, launch_update_and_restart
 def candidate_status(track: Track, candidate: SearchCandidate) -> str:
     expected = track.duration_ms / 1000
     difference = abs(candidate.duration - expected) if candidate.duration and expected else 0
-    return "要確認" if candidate.score < 0.85 or difference > max(15, expected * 0.08) else "対応候補"
+    uncertain = (candidate.score < 0.85 or candidate.title_score < 0.6
+                 or difference > max(15, expected * 0.08))
+    return "要確認" if uncertain else "対応候補"
+
+
+def duration_text(seconds: float) -> str:
+    total = max(0, int(seconds))
+    return f"{total // 60}:{total % 60:02d}" if total else "--:--"
 
 
 def track_data(track: Track) -> dict[str, Any]:
@@ -103,10 +110,12 @@ class Backend:
                 raise ValueError("この曲には候補がありません。")
             track.excluded = not track.excluded
             self.emit("track", index=index, track=track_data(track))
-        elif action in {"load", "connect", "match", "correct", "download", "check_update", "download_update"}:
+        elif action in {"load", "connect", "match", "correct", "correct_search", "download",
+                        "check_update", "download_update"}:
             self.cancel.clear()
             self.busy = True
-            self.emit("busy", operation=action, cancellable=action in {"match", "download", "download_update"})
+            self.emit("busy", operation=action,
+                      cancellable=action in {"match", "download", "download_update"})
 
             def run() -> None:
                 try:
@@ -256,6 +265,30 @@ class Backend:
         self.mapping_ready = True
         self.emit("track", index=index, track=track_data(track), thumbnail=base64.b64encode(thumbnail).decode("ascii") if thumbnail else "", detail="")
         self.emit("notice", message=f"「{track.name}」の候補を変更しました。動画を確認してから保存してください。")
+
+    def _correct_search(self, command: dict[str, Any]) -> None:
+        index = int(command["index"])
+        if not self.playlist or not 0 <= index < len(self.playlist.tracks):
+            raise ValueError("曲が見つかりません。")
+        track = self.playlist.tracks[index]
+        downloader = AudioDownloader(self.config, self.cancel, lambda *_: None)
+        query = str(command.get("query", "")).strip()
+        candidates = downloader.search_candidates(track, query, limit=6)
+        results = []
+        for candidate in candidates:
+            if self.cancel.is_set():
+                raise DownloadCancelled("キャンセルしました。")
+            thumbnail = downloader.fetch_thumbnail(candidate.thumbnail_url)
+            results.append({
+                "url": candidate.url,
+                "title": candidate.title,
+                "uploader": candidate.uploader,
+                "duration_text": duration_text(candidate.duration),
+                "score": round(candidate.score, 3),
+                "title_score": round(candidate.title_score, 3),
+                "thumbnail": base64.b64encode(thumbnail).decode("ascii") if thumbnail else "",
+            })
+        self.emit("correction_candidates", index=index, query=query, candidates=results)
 
     def _check_update(self, command: dict[str, Any]) -> None:
         self.release = GitHubUpdater(__version__).check()

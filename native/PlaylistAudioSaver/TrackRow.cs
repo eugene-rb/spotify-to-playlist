@@ -59,6 +59,14 @@ public sealed class TrackRow : INotifyPropertyChanged
     }
 }
 
+public sealed class CorrectionCandidate
+{
+    public string Url { get; init; } = "";
+    public string Title { get; init; } = "";
+    public string Detail { get; init; } = "";
+    public ImageSource? Thumbnail { get; set; }
+}
+
 internal static class JsonExtensions
 {
     public static string Text(this JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
