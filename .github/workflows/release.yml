@@ -1,0 +1,62 @@
+name: Build Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Verify tag version
+        shell: pwsh
+        run: |
+          $PackageVersion = python -c "from playlist_audio_saver import __version__; print(__version__)"
+          $TagVersion = "${{ github.ref_name }}".TrimStart("v")
+          if ($PackageVersion -ne $TagVersion) {
+            throw "Tag version $TagVersion does not match package version $PackageVersion"
+          }
+      - name: Test
+        run: python -m pytest -q
+      - name: Build
+        run: >-
+          python -m PyInstaller --noconfirm --clean --windowed
+          --name PlaylistAudioSaver --paths src
+          --hidden-import keyring.backends.Windows launcher.py
+      - name: Create release archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\PlaylistAudioSaver\*" -DestinationPath "PlaylistAudioSaver-win64.zip"
+          $Hash = (Get-FileHash "PlaylistAudioSaver-win64.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $Hash | Set-Content "PlaylistAudioSaver-win64.zip.sha256" -Encoding ascii
+          $Size = (Get-Item "PlaylistAudioSaver-win64.zip").Length
+          @{
+            tag_name = "${{ github.ref_name }}"
+            sha256 = $Hash
+            size = $Size
+            download_url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/PlaylistAudioSaver-win64.zip"
+            page_url = "https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+            notes = "変更内容はリリースページで確認できます。"
+          } | ConvertTo-Json | Set-Content "update.json" -Encoding utf8NoBOM
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          "PlaylistAudioSaver-win64.zip"
+          "PlaylistAudioSaver-win64.zip.sha256"
+          "update.json"
+          --verify-tag --generate-notes
+          --title "Playlist Audio Saver ${{ github.ref_name }}"

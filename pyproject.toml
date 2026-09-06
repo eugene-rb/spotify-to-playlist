@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "playlist-audio-saver"
+version = "0.2.0"
+description = "Windows desktop app that maps Spotify playlists to YouTube audio downloads"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "keyring>=25.6,<27",
+  "mutagen>=1.47,<2",
+  "Pillow>=11.3,<13",
+  "packaging>=25,<27",
+  "requests>=2.32,<3",
+  "yt-dlp>=2026.8.30",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pyinstaller>=6.15,<7",
+  "pytest>=8.4,<10",
+]
+
+[project.gui-scripts]
+playlist-audio-saver = "playlist_audio_saver.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
