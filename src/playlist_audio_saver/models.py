@@ -27,6 +27,7 @@ class Track:
     youtube_thumbnail_url: str = ""
     match_score: float = 0
     excluded: bool = False
+    replace_existing: bool = False
 
     @property
     def artist_text(self) -> str:
@@ -51,3 +52,5 @@ class Playlist:
     spotify_url: str
     cover_url: str
     tracks: list[Track] = field(default_factory=list)
+    kind: str = "playlist"
+    source_note: str = ""

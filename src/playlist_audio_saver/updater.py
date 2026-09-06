@@ -154,28 +154,32 @@ class GitHubUpdater:
         return staging
 
 
-def launch_update_and_restart(staging: Path) -> None:
+def launch_update_and_restart(staging: Path, *, host_executable: Path | None = None, host_pid: int | None = None) -> None:
     if not getattr(sys, "frozen", False):
         raise UpdateError("自動更新の適用はパッケージ版アプリでのみ利用できます。")
-    executable = Path(sys.executable).resolve()
+    executable = (host_executable or Path(sys.executable)).resolve()
     target = executable.parent
     staging = staging.resolve()
     temp_root = Path(tempfile.gettempdir()).resolve()
     if executable.name.lower() != EXECUTABLE_NAME.lower():
         raise UpdateError("実行ファイル名を確認できないため更新を中止しました。")
+    if host_executable is not None and (host_pid is None or host_pid <= 0 or not executable.is_file()
+                                        or Path(sys.executable).resolve().parent != executable.parent / "backend"):
+        raise UpdateError("更新するアプリの実行元を確認できません。")
     if target == Path(target.anchor) or not staging.is_relative_to(temp_root):
         raise UpdateError("更新先または一時フォルダーが安全ではありません。")
     script = staging.parent / "apply-update.ps1"
     script.write_text(
-        """param([int]$AppPid, [string]$Source, [string]$Target, [string]$Executable)
+        """param([int]$AppPid, [int]$WorkerPid, [string]$Source, [string]$Target, [string]$Executable)
 $ErrorActionPreference = 'Stop'
 for ($i = 0; $i -lt 240; $i++) {
-    if (-not (Get-Process -Id $AppPid -ErrorAction SilentlyContinue)) { break }
+    if (-not (Get-Process -Id $AppPid -ErrorAction SilentlyContinue) -and -not (Get-Process -Id $WorkerPid -ErrorAction SilentlyContinue)) { break }
     Start-Sleep -Milliseconds 250
 }
+if ((Get-Process -Id $AppPid -ErrorAction SilentlyContinue) -or (Get-Process -Id $WorkerPid -ErrorAction SilentlyContinue)) { exit 1 }
 Start-Sleep -Milliseconds 500
 Copy-Item -Path (Join-Path $Source '*') -Destination $Target -Recurse -Force
-Start-Process -FilePath (Join-Path $Target $Executable) -WorkingDirectory $Target
+Start-Process -FilePath (Join-Path $Target $Executable) -WorkingDirectory $Target -WindowStyle Hidden
 Start-Sleep -Seconds 1
 Remove-Item -LiteralPath (Split-Path $Source -Parent) -Recurse -Force -ErrorAction SilentlyContinue
 """,
@@ -186,7 +190,7 @@ Remove-Item -LiteralPath (Split-Path $Source -Parent) -Recurse -Force -ErrorActi
         subprocess.Popen(
             [
                 "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-File", str(script), "-AppPid", str(os.getpid()), "-Source", str(staging),
+                "-File", str(script), "-AppPid", str(host_pid or os.getpid()), "-WorkerPid", str(os.getpid()), "-Source", str(staging),
                 "-Target", str(target), "-Executable", EXECUTABLE_NAME,
             ],
             creationflags=creation_flags,

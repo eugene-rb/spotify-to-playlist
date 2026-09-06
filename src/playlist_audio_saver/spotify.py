@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
+from html.parser import HTMLParser
 import secrets
 import threading
 import time
@@ -25,6 +27,28 @@ SCOPES = "playlist-read-private playlist-read-collaborative"
 
 class SpotifyError(RuntimeError):
     pass
+
+
+def spotify_resource(value: str) -> tuple[str, str]:
+    value = value.strip()
+    if value.startswith("spotify:"):
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError("Spotify URIの形式を確認してください。")
+        _, kind, resource_id = parts
+    else:
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or parsed.netloc.lower() not in {"open.spotify.com", "www.open.spotify.com"}:
+            raise ValueError("Spotifyの共有リンクを入力してください。")
+        parts = [part for part in parsed.path.split("/") if part]
+        if parts and (parts[0].startswith("intl-") or parts[0] == "embed"):
+            parts = parts[1:]
+        if len(parts) != 2:
+            raise ValueError("Spotifyリンクの形式を確認してください。")
+        kind, resource_id = parts
+    if kind not in {"playlist", "album", "track"} or not re.fullmatch(r"[A-Za-z0-9]+", resource_id):
+        raise ValueError("プレイリスト・アルバム・シングル・曲のリンクを入力してください。")
+    return kind, resource_id
 
 
 def playlist_id_from_url(value: str) -> str:
@@ -243,6 +267,113 @@ class SpotifyClient:
             if not page.get("next") or not items:
                 break
         return playlist
+
+    def get_collection(self, value: str, market: str = "JP") -> Playlist:
+        kind, resource_id = spotify_resource(value)
+        if self.is_connected:
+            try:
+                return self._get_api_collection(kind, resource_id, market)
+            except SpotifyError:
+                # Public embeds remain readable for third-party playlists whose
+                # item endpoint is unavailable to Development Mode applications.
+                pass
+        try:
+            return self.get_public_collection(kind, resource_id)
+        except (SpotifyError, requests.RequestException) as exc:
+            if self.is_connected:
+                raise SpotifyError(f"Spotifyから取得できませんでした。公開状態や地域制限を確認してください。\n{exc}") from exc
+            raise SpotifyError("公開ページを取得できません。非公開の場合は設定でSpotifyに接続してください。") from exc
+
+    def _get_api_collection(self, kind: str, resource_id: str, market: str) -> Playlist:
+        url = f"https://open.spotify.com/{kind}/{resource_id}"
+        if kind == "playlist":
+            return self.get_playlist(url, market)
+        info = self._get(f"/{kind}s/{resource_id}", {"market": market})
+        album = info if kind == "album" else info.get("album") or {}
+        collection = Playlist(resource_id, info.get("name") or "Spotify", ", ".join(a["name"] for a in info.get("artists", [])),
+                              url, _first_image(album.get("images")), kind=album.get("album_type", kind) if kind == "album" else "track")
+        if kind == "track":
+            track = _parse_track(info, 1)
+            if track:
+                collection.tracks.append(track)
+            return collection
+        page = info.get("tracks") or self._get(f"/albums/{resource_id}/tracks", {"market": market, "limit": 50})
+        offset = 0
+        while True:
+            items = page.get("items") or []
+            for item in items:
+                track = _parse_track({**item, "album": album}, len(collection.tracks) + 1)
+                if track:
+                    collection.tracks.append(track)
+            offset += len(items)
+            if not page.get("next") or not items:
+                break
+            page = self._get(f"/albums/{resource_id}/tracks", {"market": market, "limit": 50, "offset": offset})
+        return collection
+
+    def get_public_collection(self, kind: str, resource_id: str) -> Playlist:
+        response = self.session.get(f"https://open.spotify.com/embed/{kind}/{resource_id}", timeout=30)
+        response.raise_for_status()
+        return parse_public_collection(response.text, kind, resource_id)
+
+
+class _EmbedDataParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = False
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":
+            self.active = dict(attrs).get("id") == "__NEXT_DATA__"
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script":
+            self.active = False
+
+    def handle_data(self, data: str) -> None:
+        if self.active:
+            self.parts.append(data)
+
+
+def parse_public_collection(html: str, kind: str, resource_id: str) -> Playlist:
+    parser = _EmbedDataParser()
+    parser.feed(html)
+    try:
+        entity = json.loads("".join(parser.parts))["props"]["pageProps"]["state"]["data"]["entity"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise SpotifyError("Spotifyの公開ページに曲情報がありません。") from exc
+    if entity.get("id") != resource_id or entity.get("type") != kind:
+        raise SpotifyError("指定されたSpotifyリンクの曲情報を確認できません。")
+    images = (entity.get("coverArt") or {}).get("sources") or (entity.get("visualIdentity") or {}).get("image") or []
+    artists = [a["name"] for a in entity.get("artists") or [] if a.get("name")]
+    collection = Playlist(resource_id, entity.get("name") or entity.get("title") or "Spotify",
+                          entity.get("subtitle") or ", ".join(artists), f"https://open.spotify.com/{kind}/{resource_id}",
+                          _first_image(images), kind=kind,
+                          source_note="公開ページ掲載分です。全曲や詳細なアルバム情報が含まれない場合があります。")
+    entries = [entity] if kind == "track" else entity.get("trackList")
+    if not isinstance(entries, list):
+        raise SpotifyError("公開ページから曲一覧を取得できません。")
+    for position, item in enumerate(entries, 1):
+        uri = item.get("uri") or ""
+        if not uri.startswith("spotify:track:") or not item.get("title"):
+            continue
+        names = [a["name"] for a in item.get("artists") or [] if a.get("name")]
+        # Spotify separates artist names with comma + non-breaking space.
+        names = names or [a.strip() for a in (item.get("subtitle") or "").split(",\u00a0") if a.strip()]
+        if not names:
+            continue
+        release = entity.get("releaseDate") or {}
+        collection.tracks.append(Track(
+            position=position, spotify_id=uri.rsplit(":", 1)[-1], name=item["title"], artists=names,
+            album=collection.name if kind == "album" else "", album_artists=[collection.owner] if kind == "album" else [],
+            release_date=str(release.get("isoString", ""))[:10] if isinstance(release, dict) else "",
+            track_number=position, disc_number=1, duration_ms=int(item.get("duration") or 0),
+            explicit=bool(item.get("isExplicit")), isrc="", spotify_url=f"https://open.spotify.com/track/{uri.rsplit(':', 1)[-1]}",
+            cover_url=collection.cover_url if kind in {"album", "track"} else ""))
+    if entries and not collection.tracks:
+        raise SpotifyError("この公開ページには対応する音楽トラックがありません。")
+    return collection
 
 
 def _first_image(images: Any) -> str:

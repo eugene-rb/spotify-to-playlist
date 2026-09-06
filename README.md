@@ -2,17 +2,19 @@
 
 [![Test](https://github.com/eugene-rb/spotify-to-playlist/actions/workflows/ci.yml/badge.svg)](https://github.com/eugene-rb/spotify-to-playlist/actions/workflows/ci.yml)
 
-Spotifyプレイリストの曲情報を読み取り、各曲をYouTubeで検索し、`yt-dlp`で音声を取得してタグ付きMP3として保存するWindows 11向けデスクトップアプリです。
+Spotifyのプレイリスト・アルバム・シングル・曲を読み取り、YouTubeの対応候補を確認・訂正して、タグ付きMP3として保存するWindows 11向けデスクトップアプリです。GUIはWPF / .NET 10のFluentテーマを使用し、Windowsのライト・ダーク設定、標準タイトルバー、スナップ、高DPI表示に対応します。
 
 ## できること
 
-- SpotifyプレイリストURL / URIの読み込み
+- プレイリスト・アルバム・シングル（albumリンク）・単曲のSpotify URL / URIの自動判別
+- 自分以外の公開プレイリストも、Spotifyの公開埋め込みページから読み込み可能（Client ID不要）
 - タイトル、アーティスト、長さを比較したYouTube候補の自動選択
 - Spotify楽曲とYouTube動画の対応を、動画サムネイル・投稿者・双方の再生時間付きで事前確認
-- Spotify曲名またはYouTube動画欄のダブルクリックで元ページを表示
-- 誤対応の曲を個別に除外し、検索中・保存中はいつでもキャンセル可能
+- 曲を選び「Spotify ↗」「YouTube ↗」で元ページを表示
+- 「候補を訂正」でYouTubeを検索し、正しい動画URLに差し替え。動画情報を再取得して一覧へ反映
+- 誤対応の曲を個別に除外し、検索中・保存中は停止可能
 - `yt-dlp` + FFmpegによるMP3変換
-- Spotify由来のタイトル、アーティスト、アルバム、発売日、トラック番号、ディスク番号、ISRC、未加工カバー画像のID3埋め込み
+- 取得できたSpotify由来のタイトル、アーティスト、アルバム、発売日、トラック番号、ディスク番号、ISRC、カバー画像をID3に埋め込み
 - Spotify曲URL、YouTube取得元URL、Spotify帰属情報のタグ保存
 - 既存ファイルのスキップ、途中キャンセル、曲単位のエラー継続
 - SpotifyトークンをWindows資格情報マネージャーへ保存
@@ -27,11 +29,11 @@ Spotifyプレイリストの曲情報を読み取り、各曲をYouTubeで検索
 ## 必要なもの
 
 - Windows 11
-- Python 3.11以降
+- 開発時のみ: Python 3.11以降、[.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。インストーラーには両方の実行環境を同梱
 - [FFmpeg](https://ffmpeg.org/download.html)（`ffmpeg.exe`をPATHへ追加するか、アプリの設定で選択）
-- Spotify PremiumアカウントとSpotify Developer App
+- 非公開プレイリストやAPI経由の詳細情報取得: Spotify Developer Appと、その利用条件を満たすSpotifyアカウント
 
-Spotifyの現行Web APIでは、プレイリスト項目は認証ユーザーが所有または共同編集するプレイリストに制限されています。第三者所有の公開プレイリストは403になる場合があります。
+公開リンクは接続設定なしで利用できます。Spotify接続済みの場合はWeb APIを優先し、第三者所有のプレイリストなどAPIで取得できない場合は公開ページを使用します。公開ページに掲載される曲数・メタデータには制限があり、全曲取得を保証するものではありません。公開ページを使用した場合は画面に明示します。非公開・削除済み・地域制限のあるコンテンツは取得できない場合があります。公開ページの形式変更で取得できなくなる可能性もあります。
 
 ## Spotify Developer Appの準備
 
@@ -42,16 +44,16 @@ Spotifyの現行Web APIでは、プレイリスト項目は認証ユーザーが
    http://127.0.0.1:43821/callback
    ```
 
-3. アプリの「設定」を開き、「Dashboardを開く」「コピー」「貼り付け」の順に操作してClient IDを設定します。Client Secretは不要です。
-4. 初回読み込み時にブラウザが開くのでSpotifyへログインして許可します。
+3. アプリの「設定」を開き、Client IDを貼り付けて「設定を保存」を押します。Client Secretは不要です。
+4. 「Spotifyに接続」でブラウザーが開くのでSpotifyへログインして許可します。非公開リンクの初回読み込み時にも認証できます。
 
 ## 基本操作
 
-1. SpotifyプレイリストURLを入力して「読み込む」を押します。
+1. Spotifyの共有リンクまたはURIを入力して「読み込む」を押します。アルバム・シングル・単曲も同じ操作です。
 2. 「対応を検索」を押します。この段階では音声をダウンロードしません。
-3. Spotify楽曲とYouTube候補の一覧を確認します。サムネイル、曲名、投稿者、時間を比較でき、リンク部分をダブルクリックするとブラウザで元ページを開けます。
-4. 誤対応があれば行を選択して「選択曲を除外」を押します。検索自体を止める場合は「キャンセル」を押します。
-5. 問題がなければ「確認済みを保存」を押します。確認ダイアログの後、除外されていない曲だけを保存します。
+3. サムネイル、曲名、投稿者、時間を比較します。行を選択して「Spotify ↗」「YouTube ↗」から元ページを確認できます。
+4. 誤対応があれば「候補を訂正」を押し、正しいYouTube動画のURLを指定します。候補が見つからなかった曲にも手動指定できます。保存しない曲は「除外」、検索・保存を中断する場合は「停止」を押します。
+5. 「○ 曲を保存」を押します。確認ダイアログの後、除外されていない候補だけを保存します。手動訂正した曲は、同名の保存済みファイルも更新します。再検索すると手動指定と除外の設定はリセットされます。
 
 ## 開発版を起動
 
@@ -83,7 +85,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 パッケージ版は起動時にGitHub Releasesの最新版を確認します。更新がある場合は確認画面を表示し、同意後にWindows版ZIPをダウンロードします。Releaseに同梱した更新マニフェストのSHA-256ダイジェストを検証し、一致した場合だけアプリ終了後にファイルを差し替えて再起動します。
 
-設定から起動時の確認を無効にでき、画面上部の「更新確認」から手動確認もできます。ソースから直接起動している開発版では自動差し替えを行いません。
+設定から起動時の確認を無効にでき、設定画面の「更新を確認」から手動確認もできます。ソースから直接起動している開発版では自動差し替えを行いません。
 
 新しいリリースは、`pyproject.toml`と`src/playlist_audio_saver/__init__.py`のバージョンを更新し、同じ番号のタグをpushするとGitHub Actionsが自動でテスト、Windowsビルド、Release公開を行います。
 
@@ -91,7 +93,12 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
+dotnet build native/PlaylistAudioSaver -c Release
 ```
+
+Windowsのデスクトップとネット接続がある環境では、`powershell -ExecutionPolicy Bypass -File scripts/test-ui.ps1` で実GUIの公開曲読み込み・行選択・訂正・エラー復帰・設定ナビゲーションを確認できます。ユーザー設定は使わず、`build/ui-automation` にテスト設定を分離します。パッケージ版は `-AppPath dist/PlaylistAudioSaver/PlaylistAudioSaver.exe` で確認できます。
+
+GUIは `native/PlaylistAudioSaver`、処理側は `src/playlist_audio_saver/backend.py` です。両者は標準入出力のJSONで通信し、認証情報はPython側だけで管理します。`--preview` はネットワークやユーザー設定への書き込みを行わない画面確認用です。`--populated`、`--settings`、`--compact`、`--dark` / `--light` と組み合わせられます。`--capture <PNGパス>` で画面を保存して終了します。
 
 ## 保存先とファイル名
 

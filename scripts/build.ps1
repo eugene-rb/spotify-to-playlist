@@ -24,22 +24,36 @@ if (-not $Iscc) {
 
 Push-Location $Workspace
 try {
-    & $Python -m PyInstaller `
-        --noconfirm `
-        --clean `
-        --windowed `
-        --name "PlaylistAudioSaver" `
-        --paths "src" `
-        --hidden-import "keyring.backends.Windows" `
-        "launcher.py"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Application build failed (exit code: $LASTEXITCODE)."
-    }
-
     $AppVersion = & $Python -c "from playlist_audio_saver import __version__; print(__version__)"
     if ($LASTEXITCODE -ne 0 -or -not $AppVersion) {
         throw "Could not determine the application version."
     }
+
+    & $Python -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --console `
+        --name "PlaylistAudioBackend" `
+        --paths "src" `
+        --hidden-import "keyring.backends.Windows" `
+        "backend_launcher.py"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Application build failed (exit code: $LASTEXITCODE)."
+    }
+
+    # Clear only the verified generated app directory, including legacy Tk files.
+    $AppOutput = [IO.Path]::GetFullPath((Join-Path $Workspace "dist/PlaylistAudioSaver"))
+    $ExpectedOutput = [IO.Path]::GetFullPath($Workspace) + [IO.Path]::DirectorySeparatorChar + "dist" + [IO.Path]::DirectorySeparatorChar + "PlaylistAudioSaver"
+    if ($AppOutput -ne $ExpectedOutput) { throw "Unexpected app output directory: $AppOutput" }
+    if (Test-Path -LiteralPath $AppOutput) {
+        Remove-Item -LiteralPath $AppOutput -Recurse -Force
+    }
+    & dotnet publish "native/PlaylistAudioSaver" -c Release -r win-x64 --self-contained true `
+        -o "dist/PlaylistAudioSaver" "-p:Version=$AppVersion" --nologo
+    if ($LASTEXITCODE -ne 0) { throw "Native GUI publish failed." }
+    $BackendDestination = Join-Path $Workspace "dist/PlaylistAudioSaver/backend"
+    New-Item -ItemType Directory -Force -Path $BackendDestination | Out-Null
+    Copy-Item -Path "dist/PlaylistAudioBackend/*" -Destination $BackendDestination -Recurse -Force
 
     & $Iscc "/DAppVersion=$AppVersion" "installer\PlaylistAudioSaver.iss"
     if ($LASTEXITCODE -ne 0) {

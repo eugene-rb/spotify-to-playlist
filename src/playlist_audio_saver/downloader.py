@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import yt_dlp
@@ -56,6 +57,26 @@ ProgressCallback = Callable[[float | None, str], None]
 
 INVALID_FILE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 SPACE_RUN = re.compile(r"\s+")
+
+
+def canonical_youtube_url(value: str) -> str:
+    parsed = urlparse(value.strip())
+    host = (parsed.hostname or "").lower()
+    video_id = ""
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+        raise ValueError("YouTube動画のURLを入力してください。")
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/")
+    elif host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
+        if parsed.path == "/watch":
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+        elif parsed.path.startswith(("/shorts/", "/embed/", "/live/")):
+            video_id = parsed.path.split("/")[2]
+    if not re.fullmatch(r"[\w-]{11}", video_id, re.ASCII):
+        raise ValueError("有効なYouTube動画のURLを入力してください。")
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
 BRACKET_NOISE = re.compile(
     r"[\[(](official\s*(music\s*)?video|official\s*audio|lyrics?|audio|mv|hd|4k)[\])]",
     re.IGNORECASE,
@@ -149,7 +170,7 @@ class AudioDownloader:
         self._check_cancelled()
         target = self.target_path(playlist, track)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if self.config.skip_existing and target.exists() and target.stat().st_size > 0:
+        if self.config.skip_existing and not track.replace_existing and target.exists() and target.stat().st_size > 0:
             return target, True
 
         if not track.selected_video_url:
@@ -199,8 +220,9 @@ class AudioDownloader:
                 produced = matches[0]
             self.progress(None, "メタデータを書き込み中")
             self.write_tags(produced, track)
-            target.unlink(missing_ok=True)
-            shutil.move(str(produced), target)
+            self._check_cancelled()
+            produced.replace(target)
+            track.replace_existing = False
         try:
             temp_parent.rmdir()
         except OSError:
@@ -258,6 +280,21 @@ class AudioDownloader:
             return response.content
         except requests.RequestException:
             return b""
+
+    def candidate_from_url(self, track: Track, value: str) -> SearchCandidate:
+        url = canonical_youtube_url(value)
+        self._check_cancelled()
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True,
+                                   "noplaylist": True, "socket_timeout": 20}) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            raise DownloadError(f"動画情報を取得できません: {exc}") from exc
+        self._check_cancelled()
+        if not info or info.get("is_live"):
+            raise DownloadError("公開済みの通常の動画を指定してください。")
+        return SearchCandidate(url, str(info.get("title") or ""), str(info.get("uploader") or info.get("channel") or ""),
+                               float(info.get("duration") or 0), score_candidate(track, info), _thumbnail_url(info))
 
     def write_tags(self, path: Path, track: Track) -> None:
         try:
