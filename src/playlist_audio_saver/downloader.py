@@ -141,14 +141,19 @@ def score_candidate(track: Track, candidate: dict[str, Any]) -> float:
     return assess_candidate(track, candidate)[0]
 
 
-def assess_candidate(track: Track, candidate: dict[str, Any]) -> tuple[float, float]:
+def assess_candidate(
+    track: Track,
+    candidate: dict[str, Any],
+    preferred_uploaders: frozenset[str] = frozenset(),
+) -> tuple[float, float]:
     """Return ``(overall score, title-only match 0..1)`` for a search result.
 
     The song title (with the artist stripped out) dominates the score so that a
     different song by the right artist can never look like a confident match.
     The uploader being the artist, a ``- Topic`` art-track channel or a ``VEVO``
     channel is weighted heavily; lyric videos, covers, karaoke, edits and live
-    clips are pushed down.
+    clips are pushed down. ``preferred_uploaders`` holds normalised channel
+    names the user has picked before for this artist and adds a small bonus.
     """
     title = _normalize(str(candidate.get("title") or ""))
     uploader = _normalize(str(candidate.get("uploader") or candidate.get("channel") or ""))
@@ -163,6 +168,8 @@ def assess_candidate(track: Track, candidate: dict[str, Any]) -> tuple[float, fl
     )
 
     authority = _uploader_authority(artists, title, uploader)
+    if uploader and any(name and name in uploader for name in preferred_uploaders):
+        authority += 0.2
 
     duration = float(candidate.get("duration") or 0)
     expected = track.duration_ms / 1000
@@ -231,10 +238,15 @@ def _uploader_authority(artists: list[str], title: str, uploader: str) -> float:
     return 0.0
 
 
+BRACKETED_FAN_EDIT = re.compile(r"[【\[(]\s*(mad|amv|fan\s*edit|nightcore)\s*[】\])]", re.IGNORECASE)
+
+
 def _noise_penalty(candidate: dict[str, Any], title: str, uploader: str) -> float:
     text = f"{title} {uploader}"
     tokens = set(text.split())
     penalty = 0.0
+    if BRACKETED_FAN_EDIT.search(str(candidate.get("title") or "")):
+        penalty += 0.5
     if any(_matches_term(term, text, tokens) for term in LYRIC_TERMS):
         penalty += 0.15
     if any(_matches_term(term, text, tokens) for term in COVER_TERMS):
@@ -256,10 +268,12 @@ class AudioDownloader:
         config: AppConfig,
         cancel_event: threading.Event,
         progress: ProgressCallback,
+        preferred_uploaders: Callable[[Track], frozenset[str]] | None = None,
     ) -> None:
         self.config = config
         self.cancel_event = cancel_event
         self.progress = progress
+        self.preferred_uploaders = preferred_uploaders or (lambda _track: frozenset())
         self.http = requests.Session()
         self._cover_cache: dict[str, tuple[bytes, str]] = {}
 
@@ -354,10 +368,10 @@ class AudioDownloader:
         loose_title = TRAILING_LATIN.sub("", title).strip()
         raw = [
             user_query,
-            f"{artist} - {title} official audio" if not user_query else "",
             f"{artist} {title}",
             f"{title} {artist}",
             f"{artist} {loose_title}" if loose_title and loose_title != title else "",
+            f"{artist} {title} official audio",
             title,
         ]
         variants: list[str] = []
@@ -367,35 +381,51 @@ class AudioDownloader:
                 variants.append(collapsed)
         return variants
 
+    def _to_candidate(self, track: Track, entry: dict[str, Any], preferred: frozenset[str]) -> SearchCandidate | None:
+        video_id = str(entry.get("id") or "")
+        url = str(entry.get("webpage_url") or entry.get("url") or "")
+        if url and not url.startswith("http") and video_id:
+            url = f"https://www.youtube.com/watch?v={video_id}"
+        elif not url and video_id:
+            url = f"https://www.youtube.com/watch?v={video_id}"
+        if not url:
+            return None
+        overall, title_score = assess_candidate(track, entry, preferred)
+        return SearchCandidate(
+            url=url,
+            title=str(entry.get("title") or ""),
+            uploader=str(entry.get("uploader") or entry.get("channel") or ""),
+            duration=float(entry.get("duration") or 0),
+            score=overall,
+            thumbnail_url=_thumbnail_url(entry),
+            title_score=title_score,
+        )
+
     def _ranked(self, track: Track, user_query: str, limit: int) -> list[SearchCandidate]:
         wanted = max(1, min(max(limit, self.config.search_results), 15))
-        entries: list[dict[str, Any]] = []
+        preferred = self.preferred_uploaders(track)
+        pool: dict[str, SearchCandidate] = {}
+        attempted = performed = 0
+        # Try progressively looser queries, merging their results. Stop once the
+        # pool holds a confident hit, after two queries that returned anything,
+        # or after three searches total - so a track whose only YouTube upload
+        # has a translated title still costs a bounded number of requests.
         for query in self._query_variants(track, user_query):
-            entries = self._search_entries(f"ytsearch{wanted}:{query}")
-            if entries:
+            if attempted >= 3:
                 break
-        candidates: list[SearchCandidate] = []
-        for entry in entries:
-            video_id = str(entry.get("id") or "")
-            url = str(entry.get("webpage_url") or entry.get("url") or "")
-            if url and not url.startswith("http") and video_id:
-                url = f"https://www.youtube.com/watch?v={video_id}"
-            elif not url and video_id:
-                url = f"https://www.youtube.com/watch?v={video_id}"
-            if not url:
+            attempted += 1
+            entries = self._search_entries(f"ytsearch{wanted}:{query}")
+            if not entries:
                 continue
-            overall, title_score = assess_candidate(track, entry)
-            candidates.append(SearchCandidate(
-                url=url,
-                title=str(entry.get("title") or ""),
-                uploader=str(entry.get("uploader") or entry.get("channel") or ""),
-                duration=float(entry.get("duration") or 0),
-                score=overall,
-                thumbnail_url=_thumbnail_url(entry),
-                title_score=title_score,
-            ))
-        candidates.sort(key=lambda candidate: candidate.score, reverse=True)
-        return candidates[:limit]
+            performed += 1
+            for entry in entries:
+                candidate = self._to_candidate(track, entry, preferred)
+                if candidate and (candidate.url not in pool or candidate.score > pool[candidate.url].score):
+                    pool[candidate.url] = candidate
+            best = max(pool.values(), key=lambda item: item.score)
+            if (best.title_score >= 0.5 and best.score >= 0.9) or performed >= 2:
+                break
+        return sorted(pool.values(), key=lambda item: item.score, reverse=True)[:limit]
 
     def _search_entries(self, target: str) -> list[dict[str, Any]]:
         options = {

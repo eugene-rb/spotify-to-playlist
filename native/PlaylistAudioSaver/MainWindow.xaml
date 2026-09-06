@@ -160,6 +160,11 @@
         <StackPanel Grid.Column="1" Margin="0,0,20,0"><TextBlock Text="音質（0 = 最高）" Margin="0,0,0,8" /><ComboBox x:Name="QualityInput" MinHeight="36" AutomationProperties.Name="MP3音質" /></StackPanel>
         <StackPanel Grid.Column="2"><TextBlock Text="検索候補数" Margin="0,0,0,8" /><ComboBox x:Name="ResultsInput" MinHeight="36" AutomationProperties.Name="検索候補数" /></StackPanel>
        </Grid></Border>
+       <TextBlock Text="訂正履歴" FontWeight="SemiBold" Margin="0,0,0,10" />
+       <Border Style="{StaticResource Card}" Margin="0,0,0,22"><StackPanel>
+        <DockPanel><Button x:Name="ForgetCorrectionsButton" Content="履歴を消去" Click="ForgetCorrections_Click" DockPanel.Dock="Right" Style="{StaticResource Action}" AutomationProperties.Name="訂正履歴を消去" /><TextBlock x:Name="CorrectionsText" Text="訂正履歴" VerticalAlignment="Center" FontWeight="SemiBold" /></DockPanel>
+        <TextBlock Text="「候補を訂正」で選んだ動画を記録し、次回の検索でその曲に自動で適用します。同じアーティストの他の曲でも、選んだチャンネルを優先します。" Style="{StaticResource Muted}" Margin="0,10,0,0" />
+       </StackPanel></Border>
        <TextBlock Text="アプリについて" FontWeight="SemiBold" Margin="0,0,0,10" />
        <Border Style="{StaticResource Card}" Margin="0,0,0,10"><StackPanel>
         <DockPanel><Button x:Name="UpdateButton" Content="更新を確認" Click="Update_Click" DockPanel.Dock="Right" Style="{StaticResource Action}" /><TextBlock x:Name="AboutVersion" Text="Playlist Audio Saver" VerticalAlignment="Center" FontWeight="SemiBold" /></DockPanel>

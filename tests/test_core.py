@@ -165,6 +165,38 @@ def test_search_relaxes_the_query_when_youtube_returns_nothing(monkeypatch) -> N
     assert best.url.endswith("c" * 11)
     assert any("魔性の女A" in query for query in seen)      # tried the exact title first
     assert any(query.endswith("魔性の女") for query in seen)  # then the relaxed one
+    assert len(seen) <= 3  # a translated-title track stays within the search budget
+
+
+def test_search_merges_a_second_query_when_the_first_is_weak(monkeypatch) -> None:
+    # "chaplin GTA": the first query returns only unrelated popular videos, so the
+    # ranker must also pull in the looser query where the real track shows up.
+    track = replace(sample_track(), name="GTA", artists=["chaplin"], duration_ms=113_000)
+    downloader = AudioDownloader(AppConfig(), threading.Event(), lambda *_: None)
+    junk = [{"id": "j" * 11, "title": "GTA V Charlie Chaplin easter egg", "uploader": "gamer", "duration": 200}]
+    real = [{"id": "r" * 11, "title": "GTA", "uploader": "Chaplin", "duration": 113}]
+    calls: list[str] = []
+
+    class FakeYdl:
+        def __init__(self, *_a, **_k): ...
+        def __enter__(self): return self
+        def __exit__(self, *_): ...
+        def extract_info(self, target, download=False):
+            calls.append(target)
+            return {"entries": real if len(calls) >= 2 else junk}
+
+    monkeypatch.setattr("playlist_audio_saver.downloader.yt_dlp.YoutubeDL", FakeYdl)
+    best = downloader.search(track)
+    assert best.url.endswith("r" * 11)          # the real track won after the merge
+    assert len(calls) == 2                       # capped at two productive searches
+
+
+def test_previously_chosen_channel_is_boosted_for_the_same_artist() -> None:
+    track = replace(sample_track(), name="Poison", artists=["chaplin"], duration_ms=180_000)
+    entry = {"title": "chaplin - Poison", "uploader": "Chaplin", "duration": 180}
+    plain, _ = assess_candidate(track, entry)
+    boosted, _ = assess_candidate(track, entry, frozenset({"chaplin"}))
+    assert boosted > plain
 
 
 def test_search_raises_when_every_attempt_fails(monkeypatch) -> None:

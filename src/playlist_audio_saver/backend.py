@@ -16,7 +16,15 @@ from typing import Any, Callable
 
 from . import __version__
 from .config import AppConfig, ConfigStore
-from .downloader import AudioDownloader, DownloadCancelled, SearchCandidate, apply_candidate, ffmpeg_available
+from .corrections import Correction, CorrectionStore
+from .downloader import (
+    AudioDownloader,
+    DownloadCancelled,
+    SearchCandidate,
+    apply_candidate,
+    canonical_youtube_url,
+    ffmpeg_available,
+)
 from .models import Playlist, Track
 from .spotify import SpotifyClient, SpotifyError, spotify_resource
 from .updater import GitHubUpdater, UpdateCancelled, launch_update_and_restart
@@ -33,6 +41,26 @@ def candidate_status(track: Track, candidate: SearchCandidate) -> str:
 def duration_text(seconds: float) -> str:
     total = max(0, int(seconds))
     return f"{total // 60}:{total % 60:02d}" if total else "--:--"
+
+
+def _video_id(url: str) -> str:
+    try:
+        return canonical_youtube_url(url).rsplit("=", 1)[-1]
+    except ValueError:
+        return ""
+
+
+def _apply_remembered(track: Track, record: Correction) -> None:
+    track.selected_video_url = record.video_url
+    track.selected_video_title = record.video_title or record.video_url
+    track.selected_video_uploader = record.video_uploader
+    track.selected_video_duration = 0
+    video_id = _video_id(record.video_url)
+    track.youtube_thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg" if video_id else ""
+    track.match_score = 0
+    track.excluded = False
+    track.replace_existing = False
+    track.status = "前回の指定"
 
 
 def track_data(track: Track) -> dict[str, Any]:
@@ -61,10 +89,12 @@ def validated_config(raw: dict[str, Any]) -> AppConfig:
 
 
 class Backend:
-    def __init__(self, emit: Callable[..., None], store: ConfigStore | None = None) -> None:
+    def __init__(self, emit: Callable[..., None], store: ConfigStore | None = None,
+                 corrections: CorrectionStore | None = None) -> None:
         self.emit = emit
         self.store = store or ConfigStore()
         self.config = self.store.load()
+        self.corrections = corrections or CorrectionStore()
         self.spotify = SpotifyClient(self.config.client_id, self.config.redirect_port)
         self.playlist: Playlist | None = None
         self.mapping_ready = False
@@ -74,10 +104,14 @@ class Backend:
         self.release = None
         self.staging: Path | None = None
 
+    def _downloader(self, progress: Callable[..., None] = lambda *_: None) -> AudioDownloader:
+        return AudioDownloader(self.config, self.cancel, progress, self.corrections.preferred_uploaders)
+
     def state(self) -> None:
         self.emit("state", config=asdict(self.config), connected=self.spotify.is_connected,
                   output_dir=str(self.config.resolved_output_dir), version=__version__,
-                  ffmpeg=ffmpeg_available(self.config.ffmpeg_path), packaged=bool(getattr(sys, "frozen", False)))
+                  ffmpeg=ffmpeg_available(self.config.ffmpeg_path), packaged=bool(getattr(sys, "frozen", False)),
+                  corrections=self.corrections.count)
 
     def dispatch(self, command: dict[str, Any]) -> None:
         action = command.get("action")
@@ -99,6 +133,10 @@ class Backend:
             self.spotify.disconnect()
             self.state()
             self.emit("notice", message="Spotifyの接続を解除しました。")
+        elif action == "forget_corrections":
+            self.corrections.clear()
+            self.state()
+            self.emit("notice", message="訂正履歴を消去しました。")
         elif action == "exclude":
             if not self.playlist or not self.mapping_ready:
                 raise ValueError("先に対応を検索してください。")
@@ -170,18 +208,28 @@ class Backend:
             raise ValueError("プレイリストを読み込んでください。")
         self.mapping_ready = False
         tracks = self.playlist.tracks
-        downloader = AudioDownloader(self.config, self.cancel, lambda *_: None)
+        downloader = self._downloader()
         for index, track in enumerate(tracks):
             track.selected_video_url = track.selected_video_title = track.selected_video_uploader = ""
             track.youtube_thumbnail_url = ""
             track.selected_video_duration = track.match_score = 0
-            track.excluded = False
+            track.excluded = track.replace_existing = False
             track.status = "検索待ち"
             self.emit("track", index=index, track=track_data(track))
         matched = failed = 0
         for index, track in enumerate(tracks):
             if self.cancel.is_set():
                 break
+            remembered = self.corrections.lookup(track)
+            if remembered is not None:
+                _apply_remembered(track, remembered)
+                thumbnail = downloader.fetch_thumbnail(track.youtube_thumbnail_url)
+                matched += 1
+                self.emit("track", index=index, track=track_data(track),
+                          thumbnail=base64.b64encode(thumbnail).decode("ascii") if thumbnail else "")
+                self.emit("progress", percent=(index + 1) / len(tracks) * 100,
+                          message=f"対応を検索中  ·  {index + 1} / {len(tracks)} 曲")
+                continue
             track.status = "検索中"
             self.emit("track", index=index, track=track_data(track))
             try:
@@ -225,7 +273,7 @@ class Backend:
         def progress(ratio: float | None, label: str) -> None:
             self.emit("progress", percent=(completed + (ratio or 0)) / len(tracks) * 100, message=label)
 
-        downloader = AudioDownloader(self.config, self.cancel, progress)
+        downloader = self._downloader(progress)
         for index, track in tracks:
             if self.cancel.is_set():
                 break
@@ -255,7 +303,7 @@ class Backend:
         if not self.playlist or not 0 <= index < len(self.playlist.tracks):
             raise ValueError("曲が見つかりません。")
         track = self.playlist.tracks[index]
-        downloader = AudioDownloader(self.config, self.cancel, lambda *_: None)
+        downloader = self._downloader()
         candidate = downloader.candidate_from_url(track, str(command.get("url", "")))
         thumbnail = downloader.fetch_thumbnail(candidate.thumbnail_url)
         apply_candidate(track, candidate)
@@ -263,7 +311,10 @@ class Backend:
         track.replace_existing = True
         track.status = "手動指定"
         self.mapping_ready = True
+        self.corrections.remember(track, video_url=candidate.url, video_title=candidate.title,
+                                  video_uploader=candidate.uploader)
         self.emit("track", index=index, track=track_data(track), thumbnail=base64.b64encode(thumbnail).decode("ascii") if thumbnail else "", detail="")
+        self.state()
         self.emit("notice", message=f"「{track.name}」の候補を変更しました。動画を確認してから保存してください。")
 
     def _correct_search(self, command: dict[str, Any]) -> None:
@@ -271,21 +322,47 @@ class Backend:
         if not self.playlist or not 0 <= index < len(self.playlist.tracks):
             raise ValueError("曲が見つかりません。")
         track = self.playlist.tracks[index]
-        downloader = AudioDownloader(self.config, self.cancel, lambda *_: None)
+        downloader = self._downloader()
         query = str(command.get("query", "")).strip()
         candidates = downloader.search_candidates(track, query, limit=6)
-        results = []
+
+        remembered = self.corrections.lookup(track)
+        seen: set[str] = set()
+        ordered: list[tuple[SearchCandidate | Correction, bool]] = []
+        if remembered is not None:
+            ordered.append((remembered, True))
+            seen.add(remembered.video_url)
         for candidate in candidates:
+            if candidate.url not in seen:
+                ordered.append((candidate, False))
+                seen.add(candidate.url)
+
+        results = []
+        for item, pinned in ordered:
             if self.cancel.is_set():
                 raise DownloadCancelled("キャンセルしました。")
-            thumbnail = downloader.fetch_thumbnail(candidate.thumbnail_url)
+            if pinned:
+                assert isinstance(item, Correction)
+                thumb_id = _video_id(item.video_url)
+                thumbnail = downloader.fetch_thumbnail(
+                    f"https://i.ytimg.com/vi/{thumb_id}/mqdefault.jpg" if thumb_id else "")
+                results.append({
+                    "url": item.video_url, "title": item.video_title or item.video_url,
+                    "uploader": item.video_uploader, "duration_text": "前回選んだ動画",
+                    "score": 0.0, "title_score": 0.0, "pinned": True,
+                    "thumbnail": base64.b64encode(thumbnail).decode("ascii") if thumbnail else "",
+                })
+                continue
+            assert isinstance(item, SearchCandidate)
+            thumbnail = downloader.fetch_thumbnail(item.thumbnail_url)
             results.append({
-                "url": candidate.url,
-                "title": candidate.title,
-                "uploader": candidate.uploader,
-                "duration_text": duration_text(candidate.duration),
-                "score": round(candidate.score, 3),
-                "title_score": round(candidate.title_score, 3),
+                "url": item.url,
+                "title": item.title,
+                "uploader": item.uploader,
+                "duration_text": duration_text(item.duration),
+                "score": round(item.score, 3),
+                "title_score": round(item.title_score, 3),
+                "pinned": False,
                 "thumbnail": base64.b64encode(thumbnail).decode("ascii") if thumbnail else "",
             })
         self.emit("correction_candidates", index=index, query=query, candidates=results)

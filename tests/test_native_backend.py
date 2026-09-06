@@ -7,6 +7,7 @@ import pytest
 from playlist_audio_saver import backend as backend_module
 from playlist_audio_saver.backend import Backend, validated_config
 from playlist_audio_saver.config import AppConfig, ConfigStore
+from playlist_audio_saver.corrections import CorrectionStore
 from playlist_audio_saver.downloader import AudioDownloader, DownloadCancelled, SearchCandidate, canonical_youtube_url
 from playlist_audio_saver.models import Playlist
 from playlist_audio_saver.spotify import SpotifyClient, SpotifyError, parse_public_collection, spotify_resource
@@ -116,7 +117,8 @@ def test_manual_video_rejects_non_video_urls(value):
 @pytest.fixture
 def service(tmp_path):
     events = []
-    backend = Backend(lambda event, **data: events.append({"event": event, **data}), ConfigStore(tmp_path))
+    backend = Backend(lambda event, **data: events.append({"event": event, **data}),
+                      ConfigStore(tmp_path), CorrectionStore(tmp_path))
     backend.playlist = Playlist("abc", "Test", "Owner", "", "", tracks=[sample_track(), sample_track()])
     return backend, events
 
@@ -139,6 +141,46 @@ def test_manual_correction_can_recover_failed_match(service, monkeypatch):
     assert track.selected_video_url == candidate.url and not track.excluded
     assert track.status == "手動指定" and track.replace_existing
     assert backend.mapping_ready and events[-1]["event"] == "idle"
+    # The pick is remembered for next time.
+    assert backend.corrections.lookup(track).video_url == candidate.url
+
+
+def test_match_reuses_a_remembered_correction_without_searching(service, monkeypatch):
+    backend, events = service
+    track = backend.playlist.tracks[0]
+    backend.corrections.remember(track, video_url="https://www.youtube.com/watch?v=abcdefghijk",
+                                 video_title="Chosen", video_uploader="Chosen Channel")
+    def boom(*_a, **_k):
+        raise AssertionError("search must not run for a remembered track")
+    monkeypatch.setattr(AudioDownloader, "search", boom)
+    monkeypatch.setattr(AudioDownloader, "fetch_thumbnail", lambda *_: b"")
+    run_command(backend, {"action": "match"})
+    assert track.selected_video_url.endswith("abcdefghijk")
+    assert track.status == "前回の指定" and not track.excluded
+    assert backend.mapping_ready
+
+
+def test_correction_search_pins_the_remembered_pick_first(service, monkeypatch):
+    backend, events = service
+    track = backend.playlist.tracks[0]
+    backend.corrections.remember(track, video_url="https://www.youtube.com/watch?v=zzzzzzzzzzz",
+                                 video_title="Old choice", video_uploader="Old")
+    found = [SearchCandidate("https://www.youtube.com/watch?v=aaaaaaaaaaa", "Fresh", "Artist", 181, 1.7, title_score=0.9)]
+    monkeypatch.setattr(AudioDownloader, "search_candidates", lambda *_a, **_k: found)
+    monkeypatch.setattr(AudioDownloader, "fetch_thumbnail", lambda *_: b"")
+    run_command(backend, {"action": "correct_search", "index": 0, "query": ""})
+    payload = next(e for e in events if e["event"] == "correction_candidates")
+    assert [c["url"][-11:] for c in payload["candidates"]] == ["zzzzzzzzzzz", "aaaaaaaaaaa"]
+    assert payload["candidates"][0]["pinned"] is True
+
+
+def test_forget_corrections_clears_the_store(service):
+    backend, events = service
+    backend.corrections.remember(backend.playlist.tracks[0], video_url="https://www.youtube.com/watch?v=abcdefghijk",
+                                 video_title="", video_uploader="")
+    run_command(backend, {"action": "forget_corrections"})
+    assert backend.corrections.count == 0
+    assert any(e["event"] == "state" and e.get("corrections") == 0 for e in events)
 
 
 def test_correction_search_returns_ranked_candidates(service, monkeypatch):

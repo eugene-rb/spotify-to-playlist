@@ -80,6 +80,9 @@ public partial class MainWindow : Window
                 VersionText.Text = "バージョン " + message.Text("version");
                 AboutVersion.Text = "Playlist Audio Saver  ·  v" + message.Text("version");
                 FfmpegStatus.Text = message.Flag("ffmpeg") ? "FFmpegを検出しました。MP3で保存できます。" : "FFmpeg未検出。保存するにはffmpeg.exeを指定してください。";
+                var corrections = message.TryGetProperty("corrections", out var c) ? c.GetInt32() : 0;
+                CorrectionsText.Text = corrections > 0 ? $"訂正履歴  ·  {corrections} 曲" : "訂正履歴はまだありません";
+                ForgetCorrectionsButton.IsEnabled = corrections > 0;
                 FillSettings();
                 if (initialState)
                 {
@@ -350,8 +353,11 @@ public partial class MainWindow : Window
         correctionResults.Clear();
         foreach (var item in message.GetProperty("candidates").EnumerateArray())
         {
-            var row = new CorrectionCandidate { Url = item.Text("url"), Title = item.Text("title"),
-                Detail = $"{item.Text("uploader")}  ·  {item.Text("duration_text")}" };
+            var pinned = item.Flag("pinned");
+            var row = new CorrectionCandidate { Url = item.Text("url"),
+                Title = (pinned ? "↩ " : "") + item.Text("title"),
+                Detail = pinned ? $"前回この曲に選んだ動画  ·  {item.Text("uploader")}"
+                                : $"{item.Text("uploader")}  ·  {item.Text("duration_text")}" };
             if (item.Text("thumbnail") is { Length: > 0 } encoded)
             {
                 try
@@ -418,6 +424,12 @@ public partial class MainWindow : Window
     private void Disconnect_Click(object sender, RoutedEventArgs e)
     {
         if (ShowDialog("Spotifyの接続を解除", "保存されているSpotifyの認証情報を削除します。公開リンクは引き続き利用できます。", "解除する")) Send(new { action = "disconnect" });
+    }
+    private void ForgetCorrections_Click(object sender, RoutedEventArgs e)
+    {
+        if (busy || !ready) return;
+        if (ShowDialog("訂正履歴を消去", "「候補を訂正」で選んだ動画の記録をすべて削除します。次回の検索には反映されなくなります。", "消去する"))
+            Send(new { action = "forget_corrections" });
     }
     private void Connect_Click(object sender, RoutedEventArgs e) => StartCommand(new { action = "connect" }, "connect", "ブラウザーでSpotifyへの接続を許可してください。");
     private void Update_Click(object sender, RoutedEventArgs e) => StartCommand(new { action = "check_update", silent = false }, "check_update", "更新を確認中…");

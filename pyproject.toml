@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "playlist-audio-saver"
-version = "0.3.1"
+version = "0.3.2"
 description = "Windows desktop app that maps Spotify playlists to YouTube audio downloads"
 readme = "README.md"
 requires-python = ">=3.11"
