@@ -3,7 +3,7 @@ $Workspace = Split-Path -Parent $PSScriptRoot
 $Venv = Join-Path $Workspace ".venv"
 
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-    throw "Python Launcher (py.exe) が見つかりません。Python 3.11以降をインストールしてください。"
+    throw "Python Launcher (py.exe) not found. Install Python 3.11 or later."
 }
 
 if (-not (Test-Path -LiteralPath $Venv)) {
@@ -13,4 +13,4 @@ if (-not (Test-Path -LiteralPath $Venv)) {
 $Python = Join-Path $Venv "Scripts\python.exe"
 & $Python -m pip install --upgrade pip
 & $Python -m pip install -e "${Workspace}[dev]"
-Write-Host "セットアップが完了しました。 scripts\run.ps1 で起動できます。"
+Write-Host "Setup complete. Start the app with scripts\run.ps1."

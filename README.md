@@ -20,9 +20,9 @@ Spotifyプレイリストの曲情報を読み取り、各曲をYouTubeで検索
 
 ## ダウンロード
 
-[最新のWindows版をダウンロード](https://github.com/eugene-rb/spotify-to-playlist/releases/latest/download/PlaylistAudioSaver-win64.zip)
+[最新のWindows版インストーラーをダウンロード](https://github.com/eugene-rb/spotify-to-playlist/releases/latest/download/PlaylistAudioSaver-Setup.exe)
 
-ZIPを任意のフォルダーへ展開し、`PlaylistAudioSaver.exe`を起動してください。FFmpegは別途必要です。
+`PlaylistAudioSaver-Setup.exe`を実行してインストールしてください。管理者権限は不要です。FFmpegは別途必要です。
 
 ## 必要なもの
 
@@ -70,13 +70,15 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\.venv\Scripts\python.exe -m playlist_audio_saver
 ```
 
-## Windowsアプリをビルド
+## Windowsインストーラーをビルド
+
+[Inno Setup 6](https://jrsoftware.org/isinfo.php)をインストールしてから実行します。
 
 ```powershell
 .\scripts\build.ps1
 ```
 
-生成先は `dist\PlaylistAudioSaver\PlaylistAudioSaver.exe` です。FFmpegは同梱しないため、利用するPCにも別途FFmpegが必要です。
+単一EXEインストーラーの生成先は `dist\installer\PlaylistAudioSaver-Setup.exe` です。アプリ本体は `dist\PlaylistAudioSaver` にも生成されます。FFmpegは同梱しないため、利用するPCにも別途FFmpegが必要です。
 
 ## 自動アップデート
 
