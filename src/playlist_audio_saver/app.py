@@ -37,6 +37,7 @@ ACCENT = "#22c55e"
 ACCENT_ACTIVE = "#16a34a"
 DANGER = "#ef4444"
 BORDER = "#334155"
+SPOTIFY_DASHBOARD_URL = "https://developer.spotify.com/dashboard"
 
 
 class PlaylistAudioSaverApp(tk.Tk):
@@ -197,9 +198,8 @@ class PlaylistAudioSaverApp(tk.Tk):
             messagebox.showinfo("URLが必要です", "SpotifyプレイリストのURLを入力してください。", parent=self)
             return
         if not self.config_data.client_id:
-            messagebox.showinfo("Spotify設定", "最初にSpotify Client IDを設定してください。", parent=self)
-            self._open_settings()
-            return
+            if not self._open_settings(initial_setup=True):
+                return
         self._set_busy(True, cancellable=False)
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
@@ -694,13 +694,18 @@ class PlaylistAudioSaverApp(tk.Tk):
         text = "Spotify: 接続済み" if self.spotify.is_connected else "Spotify: 未接続"
         self.connection_label.configure(text=text)
 
-    def _open_settings(self) -> None:
+    def _open_settings(self, initial_setup: bool = False) -> bool:
         if self.busy:
-            return
-        dialog = SettingsDialog(self, self.config_data, self.spotify.is_connected)
+            return False
+        dialog = SettingsDialog(
+            self,
+            self.config_data,
+            self.spotify.is_connected,
+            initial_setup=initial_setup,
+        )
         self.wait_window(dialog)
         if not dialog.result:
-            return
+            return False
         old_client_id = self.config_data.client_id
         old_spotify = self.spotify
         self.config_data = dialog.result
@@ -712,6 +717,7 @@ class PlaylistAudioSaverApp(tk.Tk):
             if self.spotify is not old_spotify:
                 self.spotify.disconnect()
         self._update_connection_label()
+        return True
 
     def _on_close(self) -> None:
         if self.busy and not messagebox.askyesno("終了", "処理中です。キャンセルして終了しますか？", parent=self):
@@ -721,16 +727,24 @@ class PlaylistAudioSaverApp(tk.Tk):
 
 
 class SettingsDialog(tk.Toplevel):
-    def __init__(self, parent: PlaylistAudioSaverApp, config: AppConfig, connected: bool) -> None:
+    def __init__(
+        self,
+        parent: PlaylistAudioSaverApp,
+        config: AppConfig,
+        connected: bool,
+        initial_setup: bool = False,
+    ) -> None:
         super().__init__(parent)
-        self.title("設定")
-        self.geometry("650x540")
+        self.title("Spotifyの初期設定" if initial_setup else "設定")
+        self.geometry("700x640")
         self.resizable(False, False)
         self.configure(bg=BG)
         self.transient(parent)
         self.grab_set()
         self.result: AppConfig | None = None
         self.disconnect_requested = False
+        self.initial_setup = initial_setup
+        self.copy_status = tk.StringVar()
         self.client_id = tk.StringVar(value=config.client_id)
         self.output_dir = tk.StringVar(value=str(config.resolved_output_dir))
         self.market = tk.StringVar(value=config.market)
@@ -745,24 +759,42 @@ class SettingsDialog(tk.Toplevel):
         self.after(20, lambda: self.focus_force())
 
     def _build(self, connected: bool) -> None:
-        body = ttk.Frame(self, padding=24)
+        body = ttk.Frame(self, padding=20)
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="Spotify連携", font=("Segoe UI Semibold", 14)).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(body, text="Client ID", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(15, 5))
-        ttk.Entry(body, textvariable=self.client_id, width=54).grid(row=2, column=0, columnspan=3, sticky="ew")
-        redirect = f"http://127.0.0.1:{self.redirect_port.get()}/callback"
-        ttk.Label(body, text=f"Spotify DashboardのRedirect URI: {redirect}", style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        ttk.Label(
+            body,
+            text="下の3ステップで設定できます。Client Secretは不要です。",
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(5, 10))
 
-        ttk.Label(body, text="保存", font=("Segoe UI Semibold", 14)).grid(row=4, column=0, columnspan=3, sticky="w", pady=(22, 0))
-        ttk.Label(body, text="保存先", style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(12, 5))
-        ttk.Entry(body, textvariable=self.output_dir).grid(row=6, column=0, columnspan=2, sticky="ew", padx=(0, 8))
-        ttk.Button(body, text="参照", command=self._browse_output).grid(row=6, column=2)
-        ttk.Label(body, text="FFmpeg（空欄ならPATHから検索）", style="Muted.TLabel").grid(row=7, column=0, sticky="w", pady=(12, 5))
-        ttk.Entry(body, textvariable=self.ffmpeg_path).grid(row=8, column=0, columnspan=2, sticky="ew", padx=(0, 8))
-        ttk.Button(body, text="参照", command=self._browse_ffmpeg).grid(row=8, column=2)
+        ttk.Label(body, text="1. Spotify Dashboardでアプリを作成", style="Muted.TLabel").grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Button(body, text="Dashboardを開く", command=self._open_spotify_dashboard).grid(row=2, column=2, sticky="e")
+
+        redirect = f"http://127.0.0.1:{self.redirect_port.get()}/callback"
+        ttk.Label(body, text="2. Redirect URIにこれを登録", style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 5))
+        redirect_entry = ttk.Entry(body, width=54)
+        redirect_entry.insert(0, redirect)
+        redirect_entry.configure(state="readonly")
+        redirect_entry.grid(row=4, column=0, columnspan=2, sticky="ew", padx=(0, 8))
+        ttk.Button(body, text="コピー", command=self._copy_redirect_uri).grid(row=4, column=2, sticky="e")
+
+        ttk.Label(body, text="3. 表示されたClient IDを貼り付け", style="Muted.TLabel").grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 5))
+        self.client_id_entry = ttk.Entry(body, textvariable=self.client_id, width=54)
+        self.client_id_entry.grid(row=6, column=0, columnspan=2, sticky="ew", padx=(0, 8))
+        ttk.Button(body, text="貼り付け", command=self._paste_client_id).grid(row=6, column=2, sticky="e")
+        ttk.Label(body, textvariable=self.copy_status, style="Muted.TLabel").grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
+
+        ttk.Label(body, text="保存", font=("Segoe UI Semibold", 14)).grid(row=8, column=0, columnspan=3, sticky="w", pady=(16, 0))
+        ttk.Label(body, text="保存先", style="Muted.TLabel").grid(row=9, column=0, sticky="w", pady=(8, 5))
+        ttk.Entry(body, textvariable=self.output_dir).grid(row=10, column=0, columnspan=2, sticky="ew", padx=(0, 8))
+        ttk.Button(body, text="参照", command=self._browse_output).grid(row=10, column=2)
+        ttk.Label(body, text="FFmpeg（空欄ならPATHから検索）", style="Muted.TLabel").grid(row=11, column=0, sticky="w", pady=(8, 5))
+        ttk.Entry(body, textvariable=self.ffmpeg_path).grid(row=12, column=0, columnspan=2, sticky="ew", padx=(0, 8))
+        ttk.Button(body, text="参照", command=self._browse_ffmpeg).grid(row=12, column=2)
 
         options = ttk.Frame(body, style="Panel.TFrame", padding=14)
-        options.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(18, 0))
+        options.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         ttk.Label(options, text="市場", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(options, textvariable=self.market, width=7).grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Label(options, text="音質 (0=最高)", style="Panel.TLabel").grid(row=0, column=1, sticky="w", padx=(30, 0))
@@ -773,13 +805,37 @@ class SettingsDialog(tk.Toplevel):
         ttk.Checkbutton(options, text="起動時にGitHubで更新を確認", variable=self.check_updates).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        buttons.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(14, 0))
         if connected:
             ttk.Button(buttons, text="Spotify接続を解除", command=self._disconnect).pack(side="left")
         ttk.Button(buttons, text="キャンセル", command=self.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(buttons, text="保存", style="Accent.TButton", command=self._save).pack(side="right")
+        save_text = "保存して続ける" if self.initial_setup else "保存"
+        ttk.Button(buttons, text=save_text, style="Accent.TButton", command=self._save).pack(side="right")
         body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
+
+        if self.initial_setup:
+            self.after(50, self.client_id_entry.focus_set)
+
+    def _open_spotify_dashboard(self) -> None:
+        webbrowser.open(SPOTIFY_DASHBOARD_URL)
+
+    def _copy_redirect_uri(self) -> None:
+        redirect = f"http://127.0.0.1:{self.redirect_port.get()}/callback"
+        self.clipboard_clear()
+        self.clipboard_append(redirect)
+        self.update_idletasks()
+        self.copy_status.set("Redirect URIをコピーしました。Spotify Dashboardに貼り付けてください。")
+
+    def _paste_client_id(self) -> None:
+        try:
+            value = self.clipboard_get().strip()
+        except tk.TclError:
+            self.copy_status.set("クリップボードに貼り付けられる文字列がありません。")
+            return
+        self.client_id.set(value)
+        self.client_id_entry.icursor("end")
+        self.copy_status.set("Client IDを貼り付けました。")
 
     def _browse_output(self) -> None:
         value = filedialog.askdirectory(parent=self, initialdir=self.output_dir.get())
@@ -797,6 +853,10 @@ class SettingsDialog(tk.Toplevel):
 
     def _save(self) -> None:
         client_id = self.client_id.get().strip()
+        if self.initial_setup and not client_id:
+            messagebox.showerror("Client ID", "Spotify Client IDを貼り付けてください。", parent=self)
+            self.client_id_entry.focus_set()
+            return
         if client_id and (len(client_id) < 16 or not client_id.isalnum()):
             messagebox.showerror("Client ID", "Spotify Client IDの形式を確認してください。", parent=self)
             return
