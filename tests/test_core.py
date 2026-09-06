@@ -1,5 +1,15 @@
-from playlist_audio_saver.downloader import SearchCandidate, apply_candidate, safe_filename, score_candidate
-from playlist_audio_saver.models import Track
+import threading
+from dataclasses import replace
+
+from playlist_audio_saver.config import AppConfig
+from playlist_audio_saver.downloader import (
+    AudioDownloader,
+    SearchCandidate,
+    apply_candidate,
+    safe_filename,
+    score_candidate,
+)
+from playlist_audio_saver.models import Playlist, Track
 from playlist_audio_saver.spotify import _parse_track, playlist_id_from_url
 from playlist_audio_saver.updater import GitHubUpdater, newer_version
 
@@ -41,6 +51,24 @@ def test_non_playlist_url_is_rejected() -> None:
 def test_windows_filename_is_sanitized() -> None:
     assert safe_filename('A/B: C? <D> "E"') == "A_B_ C_ _D_ _E_"
     assert safe_filename("CON") == "_CON"
+
+
+def test_target_path_uses_spotify_title_only(tmp_path) -> None:
+    downloader = AudioDownloader(AppConfig(output_dir=str(tmp_path)), threading.Event(), lambda *_: None)
+    track = replace(sample_track(), position=4, name="Example Song")
+    playlist = Playlist("id", "My Mix", "Owner", "", "", tracks=[track])
+    target = downloader.target_path(playlist, track)
+    assert target.name == "Example Song.mp3"
+    assert target.parent.name == "My Mix"
+
+
+def test_target_path_disambiguates_duplicate_titles(tmp_path) -> None:
+    downloader = AudioDownloader(AppConfig(output_dir=str(tmp_path)), threading.Event(), lambda *_: None)
+    first = replace(sample_track(), position=1, spotify_id="a", name="Intro")
+    second = replace(sample_track(), position=2, spotify_id="b", name="Intro")
+    playlist = Playlist("id", "Mix", "Owner", "", "", tracks=[first, second])
+    assert downloader.target_path(playlist, first).name == "Intro.mp3"
+    assert downloader.target_path(playlist, second).name == "Intro (2).mp3"
 
 
 def test_matching_track_beats_wrong_live_version() -> None:

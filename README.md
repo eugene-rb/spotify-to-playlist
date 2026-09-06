@@ -102,11 +102,13 @@ GUIは `native/PlaylistAudioSaver`、処理側は `src/playlist_audio_saver/back
 
 ## 保存先とファイル名
 
-既定では `ミュージック\Playlist Audio Saver\<プレイリスト名>` に、次の形式で保存します。
+既定では `ミュージック\Playlist Audio Saver\<プレイリスト名>` に、Spotifyの曲名をそのままファイル名にして保存します。
 
 ```text
-01 - アーティスト - 曲名.mp3
+曲名.mp3
 ```
+
+同じプレイリスト内に同名の曲が複数ある場合は、2曲目以降に `曲名 (2).mp3` のように連番を付けます。アーティストやトラック番号などの情報はID3タグに埋め込まれます。
 
 設定は `%APPDATA%\PlaylistAudioSaver\config.json`、Spotifyの認証トークンはWindows資格情報マネージャーに保存されます。
 

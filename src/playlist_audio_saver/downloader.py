@@ -159,11 +159,16 @@ class AudioDownloader:
 
     def target_path(self, playlist: Playlist, track: Track) -> Path:
         folder = self.config.resolved_output_dir / safe_filename(playlist.name, "Spotify Playlist")
-        filename = safe_filename(
-            f"{track.position:02d} - {track.artist_text} - {track.name}",
-            f"track-{track.position:02d}",
-            170,
-        )
+        fallback = f"track-{track.position:02d}"
+        filename = safe_filename(track.name, fallback, 170)
+        repeats = 0
+        for other in playlist.tracks:
+            if other is track:
+                break
+            if safe_filename(other.name, f"track-{other.position:02d}", 170) == filename:
+                repeats += 1
+        if repeats:
+            filename = safe_filename(f"{track.name} ({repeats + 1})", fallback, 170)
         return folder / f"{filename}.mp3"
 
     def download_track(self, playlist: Playlist, track: Track) -> tuple[Path, bool]:
