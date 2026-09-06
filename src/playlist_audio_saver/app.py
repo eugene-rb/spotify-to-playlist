@@ -737,7 +737,8 @@ class SettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Spotifyの初期設定" if initial_setup else "設定")
         self.geometry("700x640")
-        self.resizable(False, False)
+        self.minsize(520, 420)
+        self.resizable(True, True)
         self.configure(bg=BG)
         self.transient(parent)
         self.grab_set()
@@ -759,8 +760,35 @@ class SettingsDialog(tk.Toplevel):
         self.after(20, lambda: self.focus_force())
 
     def _build(self, connected: bool) -> None:
-        body = ttk.Frame(self, padding=20)
-        body.pack(fill="both", expand=True)
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        scroll_area = ttk.Frame(self)
+        scroll_area.grid(row=0, column=0, sticky="nsew")
+        scroll_area.rowconfigure(0, weight=1)
+        scroll_area.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(scroll_area, background=BG, borderwidth=0, highlightthickness=0)
+        self.settings_canvas = canvas
+        scrollbar = ttk.Scrollbar(scroll_area, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        body = ttk.Frame(canvas, padding=20)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(body_window, width=event.width),
+        )
+        self.bind("<MouseWheel>", self._scroll_settings)
+        self.bind("<Button-4>", self._scroll_settings)
+        self.bind("<Button-5>", self._scroll_settings)
+
         ttk.Label(body, text="Spotify連携", font=("Segoe UI Semibold", 14)).grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Label(
             body,
@@ -804,8 +832,8 @@ class SettingsDialog(tk.Toplevel):
         ttk.Checkbutton(options, text="同名ファイルはスキップ", variable=self.skip_existing).grid(row=2, column=0, columnspan=3, sticky="w", pady=(14, 0))
         ttk.Checkbutton(options, text="起動時にGitHubで更新を確認", variable=self.check_updates).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
-        buttons = ttk.Frame(body)
-        buttons.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        buttons = ttk.Frame(self, padding=(20, 12, 20, 16))
+        buttons.grid(row=1, column=0, sticky="ew")
         if connected:
             ttk.Button(buttons, text="Spotify接続を解除", command=self._disconnect).pack(side="left")
         ttk.Button(buttons, text="キャンセル", command=self.destroy).pack(side="right", padx=(8, 0))
@@ -816,6 +844,19 @@ class SettingsDialog(tk.Toplevel):
 
         if self.initial_setup:
             self.after(50, self.client_id_entry.focus_set)
+
+    def _scroll_settings(self, event: tk.Event) -> str | None:
+        bounds = self.settings_canvas.bbox("all")
+        if bounds is None or self.settings_canvas.winfo_height() >= bounds[3] - bounds[1]:
+            return None
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            direction = -1 if event.delta > 0 else 1
+        self.settings_canvas.yview_scroll(direction, "units")
+        return "break"
 
     def _open_spotify_dashboard(self) -> None:
         webbrowser.open(SPOTIFY_DASHBOARD_URL)
@@ -829,13 +870,14 @@ class SettingsDialog(tk.Toplevel):
 
     def _paste_client_id(self) -> None:
         try:
-            value = self.clipboard_get().strip()
+            value = "".join(self.clipboard_get().split())
         except tk.TclError:
             self.copy_status.set("クリップボードに貼り付けられる文字列がありません。")
             return
         self.client_id.set(value)
         self.client_id_entry.icursor("end")
-        self.copy_status.set("Client IDを貼り付けました。")
+        self.client_id_entry.focus_set()
+        self.copy_status.set("Client IDを貼り付けました。下の「保存」を押すと設定されます。")
 
     def _browse_output(self) -> None:
         value = filedialog.askdirectory(parent=self, initialdir=self.output_dir.get())
@@ -852,7 +894,7 @@ class SettingsDialog(tk.Toplevel):
         messagebox.showinfo("Spotify", "設定を保存すると接続情報を削除します。", parent=self)
 
     def _save(self) -> None:
-        client_id = self.client_id.get().strip()
+        client_id = "".join(self.client_id.get().split())
         if self.initial_setup and not client_id:
             messagebox.showerror("Client ID", "Spotify Client IDを貼り付けてください。", parent=self)
             self.client_id_entry.focus_set()
