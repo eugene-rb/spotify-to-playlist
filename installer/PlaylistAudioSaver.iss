@@ -22,6 +22,7 @@ OutputBaseFilename=PlaylistAudioSaver-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\native\PlaylistAudioSaver\Assets\AppIcon.ico
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

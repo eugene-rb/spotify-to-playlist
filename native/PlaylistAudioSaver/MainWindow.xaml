@@ -1,7 +1,7 @@
 <Window x:Class="PlaylistAudioSaver.MainWindow"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- Title="Playlist Audio Saver" Width="1240" Height="860" MinWidth="980" MinHeight="690"
+ Title="Playlist Audio Saver" Icon="Assets/AppIcon.ico" Width="1240" Height="860" MinWidth="980" MinHeight="690"
  FontFamily="Segoe UI Variable Text, Yu Gothic UI" FontSize="13" Foreground="{DynamicResource TextFillColorPrimaryBrush}"
  WindowStartupLocation="CenterScreen" Loaded="Window_Loaded" Closing="Window_Closing">
  <Grid Background="{DynamicResource SolidBackgroundFillColorBaseBrush}">
@@ -9,9 +9,7 @@
   <Grid Margin="12,22,12,16">
    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal" Margin="12,0,0,28">
-    <Border Width="36" Height="36" CornerRadius="10" Background="{DynamicResource AccentFillColorDefaultBrush}" Margin="0,0,11,0">
-     <TextBlock Text="&#xE8D6;" Style="{StaticResource Glyph}" Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}" HorizontalAlignment="Center" />
-    </Border>
+    <Image Source="{StaticResource AppIcon}" Width="36" Height="36" Margin="0,0,11,0" AutomationProperties.Name="Playlist Audio Saver" />
     <StackPanel VerticalAlignment="Center"><TextBlock Text="Playlist" FontSize="17" FontWeight="SemiBold" /><TextBlock Text="Audio Saver" Style="{StaticResource Muted}" FontSize="11" /></StackPanel>
    </StackPanel>
    <StackPanel Grid.Row="1">
